@@ -2,6 +2,11 @@ class MoveGenerator:
     def __init__(self, board):
         self.board = board
 
+    def piece_belongs_to_side(self, piece, is_white):
+        if piece == ".":
+            return False
+        return piece.isupper() if is_white else piece.islower()
+
     def piece_belongs_to_current_player(self, piece):
         if self.board.turn == "white":
             return piece.isupper()
@@ -277,6 +282,24 @@ class MoveGenerator:
 
         return (target_row, target_col) in moves
 
+    def has_any_legal_moves(self, is_white):
+        current_turn = self.board.turn
+        self.board.turn = "white" if is_white else "black"
+
+        try:
+            for row in range(8):
+                for col in range(8):
+                    piece = self.board.get_piece(row, col)
+                    if not self.piece_belongs_to_side(piece, is_white):
+                        continue
+
+                    if self.get_legal_moves(row, col):
+                        return True
+        finally:
+            self.board.turn = current_turn
+
+        return False
+
     def get_legal_moves(self, row, col):
         piece = self.board.get_piece(row, col)
 
@@ -336,3 +359,113 @@ class MoveGenerator:
             king_pos[1],
             by_white=not is_white
         )
+
+    def is_checkmate(self, is_white):
+        return self.is_in_check(is_white) and not self.has_any_legal_moves(is_white)
+
+    def is_stalemate(self, is_white):
+        return not self.is_in_check(is_white) and not self.has_any_legal_moves(is_white)
+
+    def is_insufficient_material(self):
+        white_bishop_squares = []
+        black_bishop_squares = []
+        white_knights = 0
+        black_knights = 0
+        other_material = []
+
+        for row in range(8):
+            for col in range(8):
+                piece = self.board.get_piece(row, col)
+                if piece in (".", "K", "k"):
+                    continue
+
+                piece_type = piece.lower()
+                if piece_type == "b":
+                    square_color = (row + col) % 2
+                    if piece.isupper():
+                        white_bishop_squares.append(square_color)
+                    else:
+                        black_bishop_squares.append(square_color)
+                elif piece_type == "n":
+                    if piece.isupper():
+                        white_knights += 1
+                    else:
+                        black_knights += 1
+                else:
+                    other_material.append(piece)
+
+        if other_material:
+            return False
+
+        white_minors = len(white_bishop_squares) + white_knights
+        black_minors = len(black_bishop_squares) + black_knights
+        total_minors = white_minors + black_minors
+
+        if total_minors == 0:
+            return True
+
+        if total_minors == 1:
+            return True
+
+        if white_knights == 1 and black_knights == 1 and total_minors == 2:
+            return True
+
+        if (
+            white_knights == 0
+            and black_knights == 0
+            and len(white_bishop_squares) == 1
+            and len(black_bishop_squares) == 1
+            and white_bishop_squares[0] == black_bishop_squares[0]
+        ):
+            return True
+
+        return False
+
+    def is_fifty_move_draw(self):
+        return self.board.halfmove_clock >= 100
+
+    def get_game_status(self):
+        side_to_move_is_white = self.board.turn == "white"
+        side_name = "White" if side_to_move_is_white else "Black"
+        winner = "Black" if side_to_move_is_white else "White"
+
+        if self.is_checkmate(side_to_move_is_white):
+            return {
+                "is_over": True,
+                "result": "checkmate",
+                "message": f"Checkmate - {winner} wins",
+            }
+
+        if self.is_stalemate(side_to_move_is_white):
+            return {
+                "is_over": True,
+                "result": "stalemate",
+                "message": "Draw by stalemate",
+            }
+
+        if self.is_fifty_move_draw():
+            return {
+                "is_over": True,
+                "result": "fifty_move_rule",
+                "message": "Draw by 50-move rule",
+            }
+
+        if self.is_insufficient_material():
+            return {
+                "is_over": True,
+                "result": "insufficient_material",
+                "message": "Draw by insufficient material",
+            }
+
+        if self.is_in_check(side_to_move_is_white):
+            return {
+                "is_over": False,
+                "result": "check",
+                "message": f"{side_name} to move - in check",
+            }
+
+        return {
+            "is_over": False,
+            "result": "ongoing",
+            "message": f"{side_name} to move",
+        }

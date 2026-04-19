@@ -109,8 +109,29 @@ Engine behavior:
 
 GUI behavior:
 
-- when a real player move reaches the last rank, the GUI asks for `Q`, `R`, `B`, or `N`
-- if the dialog is canceled, the move is not made
+- when a real player move reaches the last rank, the GUI shows a clickable promotion popup
+- the player can choose queen, rook, bishop, or knight
+- if the popup is canceled, the move is not made
+
+### Endgame and draw detection
+
+The engine now detects the following game-ending states:
+
+- checkmate
+- stalemate
+- draw by insufficient material
+- draw by the 50-move rule
+
+Notes:
+
+- the 50-move rule is enforced automatically in this project once the halfmove clock reaches 100
+- this is a project design choice; in official chess it is normally claimable rather than automatic
+- insufficient-material detection currently includes:
+  - king vs king
+  - king and bishop vs king
+  - king and knight vs king
+  - king and knight vs king and knight
+  - king and bishop vs king and bishop when both bishops are on the same color squares
 
 ## GUI Features
 
@@ -124,6 +145,9 @@ Current behavior:
 - only the side whose turn it is can be selected
 - if a king is in check, its square is highlighted in red
 - if the user tries a pseudo-legal move that is actually illegal because it exposes the king, the king square is highlighted in red
+- left and right arrow keys step backward and forward through move history
+- a status line under the board shows whose turn it is or whether the game has ended
+- once the game is over, the GUI stops accepting new moves
 
 This helps show pinned-piece situations and self-check attempts visually.
 
@@ -144,7 +168,9 @@ This opens the Tkinter chess window.
 - click once to select a piece
 - click a highlighted legal destination to move
 - click another piece of the same side to switch selection
-- if a pawn reaches the last rank, enter `Q`, `R`, `B`, or `N` in the promotion prompt
+- if a pawn reaches the last rank, choose a promotion piece from the popup
+- use `Left Arrow` to step backward through earlier positions
+- use `Right Arrow` to step forward again
 
 ## How The Engine Works
 
@@ -156,6 +182,7 @@ This opens the Tkinter chess window.
 - `turn`: whose turn it is
 - `castling_rights`: available castling options
 - `en_passant_target`: the square available for en passant capture
+- `halfmove_clock`: used for 50-move rule detection
 
 ### Reversible move execution
 
@@ -182,6 +209,7 @@ These methods handle:
 3. `get_legal_moves(...)` simulates each move and removes illegal ones.
 4. `is_square_attacked(...)` is used for check and castling rules.
 5. `is_in_check(...)` uses attack detection on the king square.
+6. `get_game_status(...)` determines whether the game is ongoing, check, checkmate, stalemate, or drawn.
 
 ## Tests
 
@@ -195,6 +223,11 @@ Current automated tests cover:
 - white custom knight promotion
 - black custom rook promotion
 - undo after promotion
+- checkmate detection
+- stalemate detection
+- insufficient material detection
+- 50-move rule detection
+- halfmove clock reset/increment behavior
 
 Run the tests with:
 
@@ -214,15 +247,10 @@ The project is playable, but it is not a full production chess engine yet.
 
 Things not clearly implemented yet:
 
-- checkmate detection
-- stalemate detection
 - draw rules such as threefold repetition
-- fifty-move rule
-- insufficient material detection
 - move history / PGN / notation export
 - AI opponent or search
 - timers / clocks
-- polished promotion popup UI
 - robust test coverage for every piece and edge case
 
 Also note:
@@ -233,9 +261,8 @@ Also note:
 
 Good next improvements would be:
 
-- add checkmate and stalemate detection
 - add tests for en passant and pinned pieces
-- replace the text-based promotion prompt with a clickable popup
+- add threefold repetition detection
 - fix the Unicode chess symbols in the GUI
 - add move history display
 - add an AI player
@@ -250,5 +277,7 @@ This project now supports the main move rules needed for a functional local ches
 - en passant
 - pawn promotion with choice in the GUI
 - move highlighting and check highlighting in the board UI
+- arrow-key move history navigation
+- automatic detection of checkmate, stalemate, insufficient material, and the 50-move rule
 
 It is a solid base to keep building on.

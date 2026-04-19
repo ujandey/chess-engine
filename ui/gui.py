@@ -1,5 +1,4 @@
 import tkinter as tk
-from tkinter import simpledialog
 
 from engine.board import Board
 from engine.move_generator import MoveGenerator
@@ -39,6 +38,7 @@ class ChessGUI:
         self.selected = None
         self.legal_moves = []
         self.alert_king_square = None
+        self.status_var = tk.StringVar()
 
         self.history = [self.capture_position()]
         self.history_index = 0
@@ -46,6 +46,15 @@ class ChessGUI:
         board_size = 8 * SQUARE_SIZE
         self.canvas = tk.Canvas(self.root, width=board_size, height=board_size)
         self.canvas.pack()
+        self.status_label = tk.Label(
+            self.root,
+            textvariable=self.status_var,
+            font=("Arial", 12),
+            anchor="w",
+            padx=8,
+            pady=6,
+        )
+        self.status_label.pack(fill="x")
 
         self.canvas.bind("<Button-1>", self.on_click)
         self.root.bind("<Left>", self.go_to_previous_position)
@@ -58,6 +67,7 @@ class ChessGUI:
             "board": [row[:] for row in self.board.board],
             "turn": self.board.turn,
             "en_passant_target": self.board.en_passant_target,
+            "halfmove_clock": self.board.halfmove_clock,
             "castling_rights": self.board.castling_rights.copy(),
         }
 
@@ -65,6 +75,7 @@ class ChessGUI:
         self.board.board = [row[:] for row in position["board"]]
         self.board.turn = position["turn"]
         self.board.en_passant_target = position["en_passant_target"]
+        self.board.halfmove_clock = position["halfmove_clock"]
         self.board.castling_rights = position["castling_rights"].copy()
 
     def clear_selection(self):
@@ -133,24 +144,58 @@ class ChessGUI:
 
     def ask_promotion_choice(self, piece):
         color = "White" if piece.isupper() else "Black"
+        choices = ["Q", "R", "B", "N"]
+        selected_choice = {"value": None}
 
-        while True:
-            choice = simpledialog.askstring(
-                "Pawn Promotion",
-                f"{color} pawn promotion: choose Q, R, B, or N",
-                parent=self.root,
-            )
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Pawn Promotion")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
 
-            if choice is None:
-                return None
+        tk.Label(
+            dialog,
+            text=f"{color} pawn promotion",
+            font=("Arial", 12, "bold"),
+            padx=16,
+            pady=10,
+        ).pack()
 
-            choice = choice.strip().upper()
-            if choice in {"Q", "R", "B", "N"}:
-                return choice
+        button_row = tk.Frame(dialog, padx=12, pady=8)
+        button_row.pack()
+
+        def choose(choice):
+            selected_choice["value"] = choice
+            dialog.destroy()
+
+        for choice in choices:
+            piece_key = choice if piece.isupper() else choice.lower()
+            tk.Button(
+                button_row,
+                text=PIECES[piece_key],
+                font=("Arial", 28),
+                width=2,
+                command=lambda value=choice: choose(value),
+            ).pack(side="left", padx=6)
+
+        tk.Button(
+            dialog,
+            text="Cancel",
+            command=dialog.destroy,
+            padx=10,
+            pady=4,
+        ).pack(pady=(0, 12))
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.wait_window()
+
+        return selected_choice["value"]
 
     def draw_board(self):
         self.canvas.delete("all")
         check_highlights = self.get_check_highlights()
+        game_status = self.mg.get_game_status()
+        self.status_var.set(game_status["message"])
 
         for row in range(8):
             for col in range(8):
@@ -216,6 +261,9 @@ class ChessGUI:
 
     def on_click(self, event):
         if not self.is_latest_position():
+            return
+
+        if self.mg.get_game_status()["is_over"]:
             return
 
         row = event.y // SQUARE_SIZE

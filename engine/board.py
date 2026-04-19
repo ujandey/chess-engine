@@ -3,6 +3,7 @@ class Board:
         self.board = self.create_starting_position()
         self.turn = "white"
         self.en_passant_target = None
+        self.halfmove_clock = 0
         self.castling_rights = {
             "white_kingside": True,
             "white_queenside": True,
@@ -65,6 +66,7 @@ class Board:
         captured = self.board[er][ec]
         previous_castling_rights = self.castling_rights.copy()
         previous_en_passant_target = self.en_passant_target
+        previous_halfmove_clock = self.halfmove_clock
         rook_move = None
         en_passant_capture = None
         promoted_from = None
@@ -103,6 +105,11 @@ class Board:
             self.board[er][ec] = self.get_promotion_piece(piece, promotion_choice)
             promoted_from = "p"
 
+        if piece.lower() == "p" or captured != ".":
+            self.halfmove_clock = 0
+        else:
+            self.halfmove_clock += 1
+
         if piece.lower() == "p" and abs(er - sr) == 2:
             self.en_passant_target = ((sr + er) // 2, sc)
 
@@ -120,6 +127,7 @@ class Board:
             "en_passant_capture": en_passant_capture,
             "previous_castling_rights": previous_castling_rights,
             "previous_en_passant_target": previous_en_passant_target,
+            "previous_halfmove_clock": previous_halfmove_clock,
             "promoted_from": promoted_from,
             "rook_move": rook_move,
         }
@@ -153,3 +161,4 @@ class Board:
             self.board[capture_row][capture_col] = captured_piece
         self.castling_rights = move_state["previous_castling_rights"]
         self.en_passant_target = move_state["previous_en_passant_target"]
+        self.halfmove_clock = move_state["previous_halfmove_clock"]
