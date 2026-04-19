@@ -10,6 +10,7 @@ class Board:
             "black_kingside": True,
             "black_queenside": True,
         }
+        self.position_counts = {self.get_position_key(): 1}
 
     def create_starting_position(self):
         return [
@@ -32,6 +33,20 @@ class Board:
     def get_piece(self, row, col):
         return self.board[row][col]
 
+    def get_position_key(self):
+        board_state = tuple(tuple(row) for row in self.board)
+        castling_state = (
+            self.castling_rights["white_kingside"],
+            self.castling_rights["white_queenside"],
+            self.castling_rights["black_kingside"],
+            self.castling_rights["black_queenside"],
+        )
+        return (board_state, self.turn, castling_state, self.en_passant_target)
+
+    def record_current_position(self):
+        position_key = self.get_position_key()
+        self.position_counts[position_key] = self.position_counts.get(position_key, 0) + 1
+
     def get_promotion_piece(self, piece, promotion_choice=None):
         if promotion_choice is None:
             return "Q" if piece.isupper() else "q"
@@ -45,6 +60,7 @@ class Board:
     def move_piece(self, start, end, promotion_choice=None):
         self.make_move(start, end, promotion_choice)
         self.turn = "black" if self.turn == "white" else "white"
+        self.record_current_position()
 
     def update_castling_rights_for_rook(self, piece, row, col):
         if piece == "R":

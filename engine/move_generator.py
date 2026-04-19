@@ -1,4 +1,14 @@
 class MoveGenerator:
+    MATE_SCORE = 1000
+    PIECE_VALUES = {
+        "p": 1,
+        "n": 3,
+        "b": 3,
+        "r": 5,
+        "q": 9,
+        "k": 0,
+    }
+
     def __init__(self, board):
         self.board = board
 
@@ -424,6 +434,37 @@ class MoveGenerator:
     def is_fifty_move_draw(self):
         return self.board.halfmove_clock >= 100
 
+    def is_threefold_repetition(self):
+        return self.board.position_counts.get(self.board.get_position_key(), 0) >= 3
+
+    def evaluate_position(self, depth=0):
+        game_status = self.get_game_status()
+        side_to_move_is_white = self.board.turn == "white"
+
+        if game_status["result"] == "checkmate":
+            if side_to_move_is_white:
+                return -self.MATE_SCORE + depth
+            return self.MATE_SCORE - depth
+
+        if game_status["is_over"]:
+            return 0
+
+        score = 0
+
+        for row in range(8):
+            for col in range(8):
+                piece = self.board.get_piece(row, col)
+                if piece == ".":
+                    continue
+
+                value = self.PIECE_VALUES[piece.lower()]
+                if piece.isupper():
+                    score += value
+                else:
+                    score -= value
+
+        return score
+
     def get_game_status(self):
         side_to_move_is_white = self.board.turn == "white"
         side_name = "White" if side_to_move_is_white else "Black"
@@ -448,6 +489,13 @@ class MoveGenerator:
                 "is_over": True,
                 "result": "fifty_move_rule",
                 "message": "Draw by 50-move rule",
+            }
+
+        if self.is_threefold_repetition():
+            return {
+                "is_over": True,
+                "result": "threefold_repetition",
+                "message": "Draw by threefold repetition",
             }
 
         if self.is_insufficient_material():

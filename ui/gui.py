@@ -69,6 +69,7 @@ class ChessGUI:
             "en_passant_target": self.board.en_passant_target,
             "halfmove_clock": self.board.halfmove_clock,
             "castling_rights": self.board.castling_rights.copy(),
+            "position_counts": self.board.position_counts.copy(),
         }
 
     def restore_position(self, position):
@@ -77,6 +78,7 @@ class ChessGUI:
         self.board.en_passant_target = position["en_passant_target"]
         self.board.halfmove_clock = position["halfmove_clock"]
         self.board.castling_rights = position["castling_rights"].copy()
+        self.board.position_counts = position["position_counts"].copy()
 
     def clear_selection(self):
         self.selected = None
