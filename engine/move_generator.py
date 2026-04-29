@@ -330,6 +330,104 @@ class MoveGenerator:
 
         return legal_moves
 
+    def generate_all_legal_moves(self, is_white):
+        moves = []
+
+        for r in range(8):
+            for c in range(8):
+                piece = self.board.get_piece(r, c)
+
+                if piece == ".":
+                    continue
+
+                if is_white and piece.islower():
+                    continue
+                if not is_white and piece.isupper():
+                    continue
+
+                for move in self.get_legal_moves(r, c):
+                    moves.append(((r, c), move))
+
+        return moves
+
+    # ------------------------------------------------------------------
+    # Minimax search
+    # ------------------------------------------------------------------
+
+    def minimax(self, depth, is_white_turn, alpha=float("-inf"), beta=float("inf")):
+        game_status = self.get_game_status()
+        if depth == 0 or game_status["is_over"]:
+            return self.evaluate_position(depth)
+
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white_turn else "black"
+
+        try:
+            moves = self.generate_all_legal_moves(is_white_turn)
+
+            if is_white_turn:
+                best_score = float("-inf")
+                for (start, end) in moves:
+                    move_state = self.board.make_move(start, end)
+                    score = self.minimax(depth - 1, False, alpha, beta)
+                    self.board.undo_move(start, end, move_state)
+                    best_score = max(best_score, score)
+                    alpha = max(alpha, best_score)
+                    if beta <= alpha:
+                        break
+            else:
+                best_score = float("inf")
+                for (start, end) in moves:
+                    move_state = self.board.make_move(start, end)
+                    score = self.minimax(depth - 1, True, alpha, beta)
+                    self.board.undo_move(start, end, move_state)
+                    best_score = min(best_score, score)
+                    beta = min(beta, best_score)
+                    if beta <= alpha:
+                        break
+        finally:
+            self.board.turn = previous_turn
+
+        return best_score
+
+    def find_best_move(self, depth, is_white_turn):
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white_turn else "black"
+
+        try:
+            moves = self.generate_all_legal_moves(is_white_turn)
+        finally:
+            self.board.turn = previous_turn
+
+        if not moves:
+            return None
+
+        best_move = None
+
+        if is_white_turn:
+            best_score = float("-inf")
+            for (start, end) in moves:
+                self.board.turn = "white"
+                move_state = self.board.make_move(start, end)
+                score = self.minimax(depth - 1, False, best_score, float("inf"))
+                self.board.undo_move(start, end, move_state)
+                if score > best_score:
+                    best_score = score
+                    best_move = (start, end)
+        else:
+            best_score = float("inf")
+            for (start, end) in moves:
+                self.board.turn = "black"
+                move_state = self.board.make_move(start, end)
+                score = self.minimax(depth - 1, True, float("-inf"), best_score)
+                self.board.undo_move(start, end, move_state)
+                if score < best_score:
+                    best_score = score
+                    best_move = (start, end)
+
+        self.board.turn = previous_turn
+        return best_move
+
     def is_square_attacked(self, row, col, by_white):
         for r in range(8):
             for c in range(8):

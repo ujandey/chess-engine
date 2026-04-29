@@ -115,17 +115,19 @@ GUI behavior:
 
 ### Endgame and draw detection
 
-The engine now detects the following game-ending states:
+The engine detects the following game-ending states:
 
 - checkmate
 - stalemate
 - draw by insufficient material
 - draw by the 50-move rule
+- draw by threefold repetition
 
 Notes:
 
 - the 50-move rule is enforced automatically in this project once the halfmove clock reaches 100
 - this is a project design choice; in official chess it is normally claimable rather than automatic
+- threefold repetition is tracked via a position-count dictionary keyed on (board, turn, castling rights, en passant target)
 - insufficient-material detection currently includes:
   - king vs king
   - king and bishop vs king
@@ -215,24 +217,29 @@ These methods handle:
 
 Current automated tests cover:
 
-- queenside castling legality
-- queenside rook movement during castling
+- queenside and kingside castling for both sides
+- castling blocked by check, occupied path, or attacked transit square
+- castling rights lost after king or rook moves
 - undo after castling
-- white default queen promotion
-- black default queen promotion
-- white custom knight promotion
-- black custom rook promotion
+- all four promotion pieces for both white and black
+- promotion via diagonal capture
+- invalid promotion choice falls back to queen
 - undo after promotion
+- en passant target set and cleared correctly
+- white and black en passant captures (both directions)
+- en passant undo restoring captured pawn
+- en passant filtered when it would expose the king
 - checkmate detection
 - stalemate detection
-- insufficient material detection
+- insufficient material detection (three cases)
 - 50-move rule detection
+- threefold repetition detection
 - halfmove clock reset/increment behavior
 
 Run the tests with:
 
 ```bash
-py -m unittest tests\test_castling.py tests\test_pawn_promotion.py
+py -m unittest discover -s tests
 ```
 
 If you want a syntax-only check without writing `.pyc` files:
@@ -245,27 +252,24 @@ $env:PYTHONDONTWRITEBYTECODE='1'; py -m py_compile main.py engine\board.py engin
 
 The project is playable, but it is not a full production chess engine yet.
 
-Things not clearly implemented yet:
+Things not yet implemented:
 
-- draw rules such as threefold repetition
 - move history / PGN / notation export
-- AI opponent or search
+- AI opponent (minimax with alpha-beta pruning is implemented but not wired to the GUI)
 - timers / clocks
-- robust test coverage for every piece and edge case
 
 Also note:
 
-- the GUI piece symbols may render oddly on some systems because the current Unicode strings in [ui/gui.py](c:/Users/ANUSKA/Desktop/chess-engine/ui/gui.py:5) look mojibaked and may need cleanup
+- the GUI piece symbols may render oddly on some systems depending on font availability for Unicode chess characters
 
 ## Suggested Next Steps
 
 Good next improvements would be:
 
-- add tests for en passant and pinned pieces
-- add threefold repetition detection
-- fix the Unicode chess symbols in the GUI
-- add move history display
-- add an AI player
+- wire `find_best_move` into the GUI to create an AI opponent
+- add PGN export and algebraic notation display
+- add a move history panel to the GUI
+- add timers / clocks
 
 ## Summary
 
