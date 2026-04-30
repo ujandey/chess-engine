@@ -1,5 +1,6 @@
 class MoveGenerator:
     MATE_SCORE = 1000
+    CHECK_BONUS = 0.25
     PIECE_VALUES = {
         "p": 1,
         "n": 3,
@@ -7,6 +8,86 @@ class MoveGenerator:
         "r": 5,
         "q": 9,
         "k": 0,
+    }
+
+    # Piece-square tables — white's perspective, row 0 = rank 8, row 7 = rank 1.
+    # For black pieces mirror vertically: use PST[7-row][col].
+    # Values are in pawn units (0.10 ≈ 10% of a pawn).
+    _PAWN_PST = [
+        [ 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],  # rank 8 (promotion, never here)
+        [ 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50],  # rank 7 — almost promoted
+        [ 0.10, 0.10, 0.20, 0.30, 0.30, 0.20, 0.10, 0.10],  # rank 6
+        [ 0.05, 0.05, 0.10, 0.25, 0.25, 0.10, 0.05, 0.05],  # rank 5
+        [ 0.00, 0.00, 0.00, 0.20, 0.20, 0.00, 0.00, 0.00],  # rank 4 — central push
+        [ 0.05,-0.05,-0.10, 0.00, 0.00,-0.10,-0.05, 0.05],  # rank 3
+        [ 0.05, 0.10, 0.10,-0.20,-0.20, 0.10, 0.10, 0.05],  # rank 2 — starting rank
+        [ 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],  # rank 1 (never here)
+    ]
+
+    _KNIGHT_PST = [
+        [-0.50,-0.40,-0.30,-0.30,-0.30,-0.30,-0.40,-0.50],
+        [-0.40,-0.20, 0.00, 0.00, 0.00, 0.00,-0.20,-0.40],
+        [-0.30, 0.00, 0.10, 0.15, 0.15, 0.10, 0.00,-0.30],
+        [-0.30, 0.05, 0.15, 0.20, 0.20, 0.15, 0.05,-0.30],
+        [-0.30, 0.00, 0.15, 0.20, 0.20, 0.15, 0.00,-0.30],
+        [-0.30, 0.05, 0.10, 0.15, 0.15, 0.10, 0.05,-0.30],
+        [-0.40,-0.20, 0.00, 0.05, 0.05, 0.00,-0.20,-0.40],
+        [-0.50,-0.40,-0.30,-0.30,-0.30,-0.30,-0.40,-0.50],
+    ]
+
+    _BISHOP_PST = [
+        [-0.20,-0.10,-0.10,-0.10,-0.10,-0.10,-0.10,-0.20],
+        [-0.10, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,-0.10],
+        [-0.10, 0.00, 0.05, 0.10, 0.10, 0.05, 0.00,-0.10],
+        [-0.10, 0.05, 0.05, 0.10, 0.10, 0.05, 0.05,-0.10],
+        [-0.10, 0.00, 0.10, 0.10, 0.10, 0.10, 0.00,-0.10],
+        [-0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10,-0.10],
+        [-0.10, 0.05, 0.00, 0.00, 0.00, 0.00, 0.05,-0.10],
+        [-0.20,-0.10,-0.10,-0.10,-0.10,-0.10,-0.10,-0.20],
+    ]
+
+    # Row 1 = rank 7 for white — rook on 7th is a major endgame weapon
+    _ROOK_PST = [
+        [ 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],
+        [ 0.05, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.05],  # 7th rank bonus
+        [-0.05, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,-0.05],
+        [-0.05, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,-0.05],
+        [-0.05, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,-0.05],
+        [-0.05, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,-0.05],
+        [-0.05, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,-0.05],
+        [ 0.00, 0.00, 0.00, 0.05, 0.05, 0.00, 0.00, 0.00],
+    ]
+
+    _QUEEN_PST = [
+        [-0.20,-0.10,-0.10,-0.05,-0.05,-0.10,-0.10,-0.20],
+        [-0.10, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,-0.10],
+        [-0.10, 0.00, 0.05, 0.05, 0.05, 0.05, 0.00,-0.10],
+        [-0.05, 0.00, 0.05, 0.05, 0.05, 0.05, 0.00,-0.05],
+        [ 0.00, 0.00, 0.05, 0.05, 0.05, 0.05, 0.00,-0.05],
+        [-0.10, 0.05, 0.05, 0.05, 0.05, 0.05, 0.00,-0.10],
+        [-0.10, 0.00, 0.05, 0.00, 0.00, 0.00, 0.00,-0.10],
+        [-0.20,-0.10,-0.10,-0.05,-0.05,-0.10,-0.10,-0.20],
+    ]
+
+    # King prefers castled corner in the middlegame
+    _KING_PST = [
+        [-0.30,-0.40,-0.40,-0.50,-0.50,-0.40,-0.40,-0.30],
+        [-0.30,-0.40,-0.40,-0.50,-0.50,-0.40,-0.40,-0.30],
+        [-0.30,-0.40,-0.40,-0.50,-0.50,-0.40,-0.40,-0.30],
+        [-0.30,-0.40,-0.40,-0.50,-0.50,-0.40,-0.40,-0.30],
+        [-0.20,-0.30,-0.30,-0.40,-0.40,-0.30,-0.30,-0.20],
+        [-0.10,-0.20,-0.20,-0.20,-0.20,-0.20,-0.20,-0.10],
+        [ 0.20, 0.20, 0.00, 0.00, 0.00, 0.00, 0.20, 0.20],
+        [ 0.20, 0.30, 0.10, 0.00, 0.00, 0.10, 0.30, 0.20],  # castled king corners
+    ]
+
+    PST = {
+        "p": _PAWN_PST,
+        "n": _KNIGHT_PST,
+        "b": _BISHOP_PST,
+        "r": _ROOK_PST,
+        "q": _QUEEN_PST,
+        "k": _KING_PST,
     }
 
     def __init__(self, board):
@@ -351,6 +432,46 @@ class MoveGenerator:
         return moves
 
     # ------------------------------------------------------------------
+    # Move ordering
+    # ------------------------------------------------------------------
+
+    def _move_order_score(self, start, end, is_white):
+        score = 0
+        sr, sc = start
+        er, ec = end
+        mover = self.board.get_piece(sr, sc)
+        target = self.board.get_piece(er, ec)
+
+        # Capture scoring:
+        #   winning/even trades (victim >= attacker) → band 2000+
+        #   losing trades (victim < attacker)        → band 1000+
+        # Within each band, prefer higher-value victim and lower-value attacker.
+        if target != ".":
+            victim_val = self.PIECE_VALUES.get(target.lower(), 0)
+            attacker_val = self.PIECE_VALUES.get(mover.lower(), 0)
+            base = 2000 if victim_val >= attacker_val else 1000
+            score += base + 10 * victim_val - attacker_val
+
+        # Queen promotion (default when no choice is passed)
+        if mover.lower() == "p" and (er == 0 or er == 7):
+            score += 2000
+
+        # Check detection: make/undo to see if opponent's king is attacked
+        move_state = self.board.make_move(start, end)
+        if self.is_in_check(not is_white):
+            score += 3000
+        self.board.undo_move(start, end, move_state)
+
+        return score
+
+    def order_moves(self, moves, is_white):
+        return sorted(
+            moves,
+            key=lambda m: self._move_order_score(m[0], m[1], is_white),
+            reverse=True,
+        )
+
+    # ------------------------------------------------------------------
     # Minimax search
     # ------------------------------------------------------------------
 
@@ -364,6 +485,7 @@ class MoveGenerator:
 
         try:
             moves = self.generate_all_legal_moves(is_white_turn)
+            moves = self.order_moves(moves, is_white_turn)
 
             if is_white_turn:
                 best_score = float("-inf")
@@ -402,6 +524,7 @@ class MoveGenerator:
         if not moves:
             return None, self.evaluate_position()
 
+        moves = self.order_moves(moves, is_white_turn)
         best_move = None
 
         if is_white_turn:
@@ -555,11 +678,21 @@ class MoveGenerator:
                 if piece == ".":
                     continue
 
-                value = self.PIECE_VALUES[piece.lower()]
+                piece_type = piece.lower()
+                material = self.PIECE_VALUES[piece_type]
+                pst_row = row if piece.isupper() else 7 - row
+                positional = self.PST[piece_type][pst_row][col]
+
                 if piece.isupper():
-                    score += value
+                    score += material + positional
                 else:
-                    score -= value
+                    score -= material + positional
+
+        # Reward leaving the opponent in check at leaf nodes
+        if self.is_in_check(False):   # black king in check
+            score += self.CHECK_BONUS
+        if self.is_in_check(True):    # white king in check
+            score -= self.CHECK_BONUS
 
         return score
 
