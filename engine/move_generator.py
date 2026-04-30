@@ -1,6 +1,12 @@
+from engine.opening_book import get_book_move
+
+
 class MoveGenerator:
     MATE_SCORE = 1000
     CHECK_BONUS = 0.25
+    _TT_EXACT = 0
+    _TT_LOWER = 1  # failed high — score is a lower bound
+    _TT_UPPER = 2  # failed low  — score is an upper bound
     PIECE_VALUES = {
         "p": 1,
         "n": 3,
@@ -89,9 +95,32 @@ class MoveGenerator:
         "q": _QUEEN_PST,
         "k": _KING_PST,
     }
+    EVAL_TABLE = None
 
     def __init__(self, board):
         self.board = board
+        self.board.refresh_zobrist_hash()
+        self.transposition_table = {}
+        self.killers = [[None, None] for _ in range(20)]
+        self.history = {}
+        self.nodes_searched = 0
+        self.node_count = 0
+        self.in_opening = True
+        if MoveGenerator.EVAL_TABLE is None:
+            MoveGenerator.EVAL_TABLE = self._build_eval_table()
+
+    @classmethod
+    def _build_eval_table(cls):
+        table = []
+        for row in range(8):
+            table.append([])
+            for col in range(8):
+                col_values = {".": 0}
+                for piece_type, material in cls.PIECE_VALUES.items():
+                    col_values[piece_type.upper()] = material + cls.PST[piece_type][row][col]
+                    col_values[piece_type] = -(material + cls.PST[piece_type][7 - row][col])
+                table[row].append(col_values)
+        return table
 
     def piece_belongs_to_side(self, piece, is_white):
         if piece == ".":
@@ -411,6 +440,74 @@ class MoveGenerator:
 
         return legal_moves
 
+    def get_capture_moves(self, row, col):
+        board = self.board.board
+        piece = board[row][col]
+        if piece == ".":
+            return []
+
+        moves = []
+        is_white = piece.isupper()
+        piece_type = piece.lower()
+
+        if piece_type == "p":
+            direction = -1 if is_white else 1
+            target_row = row + direction
+            if 0 <= target_row < 8:
+                for dc in (-1, 1):
+                    target_col = col + dc
+                    if not 0 <= target_col < 8:
+                        continue
+                    target = board[target_row][target_col]
+                    if target != "." and (target.islower() if is_white else target.isupper()):
+                        moves.append((target_row, target_col))
+                    elif self.board.en_passant_target == (target_row, target_col):
+                        adjacent = board[row][target_col]
+                        if adjacent.lower() == "p" and (adjacent.islower() if is_white else adjacent.isupper()):
+                            moves.append((target_row, target_col))
+            return moves
+
+        if piece_type == "n":
+            for dr, dc in ((-2, -1), (-2, 1), (-1, -2), (-1, 2),
+                           (1, -2), (1, 2), (2, -1), (2, 1)):
+                r, c = row + dr, col + dc
+                if 0 <= r < 8 and 0 <= c < 8:
+                    target = board[r][c]
+                    if target != "." and (target.islower() if is_white else target.isupper()):
+                        moves.append((r, c))
+            return moves
+
+        if piece_type == "k":
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    r, c = row + dr, col + dc
+                    if 0 <= r < 8 and 0 <= c < 8:
+                        target = board[r][c]
+                        if target != "." and (target.islower() if is_white else target.isupper()):
+                            moves.append((r, c))
+            return moves
+
+        directions = []
+        if piece_type in ("b", "q"):
+            directions += [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        if piece_type in ("r", "q"):
+            directions += [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+        for dr, dc in directions:
+            r, c = row + dr, col + dc
+            while 0 <= r < 8 and 0 <= c < 8:
+                target = board[r][c]
+                if target != ".":
+                    if target.islower() if is_white else target.isupper():
+                        moves.append((r, c))
+                    break
+                r += dr
+                c += dc
+
+        return moves
+
     def generate_all_legal_moves(self, is_white):
         moves = []
 
@@ -435,88 +532,353 @@ class MoveGenerator:
     # Move ordering
     # ------------------------------------------------------------------
 
-    def _move_order_score(self, start, end, is_white):
+    def is_capture_move(self, start, end):
+        sr, sc = start
+        er, ec = end
+        piece = self.board.get_piece(sr, sc)
+        target = self.board.get_piece(er, ec)
+        return target != "." or (piece.lower() == "p" and sc != ec)
+
+    def is_promotion_move(self, start, end):
+        piece = self.board.get_piece(start[0], start[1])
+        return piece.lower() == "p" and end[0] in (0, 7)
+
+    def _can_null_move_prune(self, is_white):
+        board = self.board.board
+        side_non_pawn_material = 0
+        total_non_king_material = 0
+
+        for row in board:
+            for piece in row:
+                piece_type = piece.lower()
+                if piece == "." or piece_type == "k":
+                    continue
+
+                value = self.PIECE_VALUES[piece_type]
+                total_non_king_material += value
+                if piece_type != "p" and is_white == piece.isupper():
+                    side_non_pawn_material += value
+
+        return side_non_pawn_material >= 7 and total_non_king_material >= 14
+
+    def _move_order_score(self, start, end, depth=0, tt_move=None):
+        move = (start, end)
+        if move == tt_move:
+            return 1_000_000
+
         score = 0
         sr, sc = start
         er, ec = end
-        mover = self.board.get_piece(sr, sc)
+        mover  = self.board.get_piece(sr, sc)
         target = self.board.get_piece(er, ec)
 
-        # Capture scoring:
-        #   winning/even trades (victim >= attacker) → band 2000+
-        #   losing trades (victim < attacker)        → band 1000+
-        # Within each band, prefer higher-value victim and lower-value attacker.
         if target != ".":
-            victim_val = self.PIECE_VALUES.get(target.lower(), 0)
+            victim_val   = self.PIECE_VALUES.get(target.lower(), 0)
             attacker_val = self.PIECE_VALUES.get(mover.lower(), 0)
-            base = 2000 if victim_val >= attacker_val else 1000
-            score += base + 10 * victim_val - attacker_val
+            score += 100_000 + 100 * victim_val - attacker_val
+        elif mover.lower() == "p" and sc != ec:
+            score += 100_000 + 100
+        elif 0 <= depth < len(self.killers):
+            if move == self.killers[depth][0]:
+                score += 80_000
+            elif move == self.killers[depth][1]:
+                score += 70_000
 
-        # Queen promotion (default when no choice is passed)
+        if score < 70_000:
+            score += self.history.get(move, 0)
+
         if mover.lower() == "p" and (er == 0 or er == 7):
-            score += 2000
-
-        # Check detection: make/undo to see if opponent's king is attacked
-        move_state = self.board.make_move(start, end)
-        if self.is_in_check(not is_white):
-            score += 3000
-        self.board.undo_move(start, end, move_state)
+            score += 90_000
 
         return score
 
-    def order_moves(self, moves, is_white):
+    def _store_killer(self, depth, move):
+        if depth < len(self.killers) and move != self.killers[depth][0]:
+            self.killers[depth][1] = self.killers[depth][0]
+            self.killers[depth][0] = move
+
+    def _store_history(self, depth, move):
+        self.history[move] = self.history.get(move, 0) + depth * depth
+
+    def order_moves(self, moves, is_white, depth=0, tt_move=None):
         return sorted(
             moves,
-            key=lambda m: self._move_order_score(m[0], m[1], is_white),
+            key=lambda m: self._move_order_score(m[0], m[1], depth, tt_move),
             reverse=True,
         )
+
+    # ------------------------------------------------------------------
+    # Quiescence search
+    # ------------------------------------------------------------------
+
+    def quiescence(self, alpha, beta, is_white_turn):
+        self.nodes_searched += 1
+        self.node_count += 1
+
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white_turn else "black"
+
+        try:
+            stand_pat = self._evaluate_material()
+
+            if is_white_turn:
+                if stand_pat >= beta:
+                    return stand_pat
+                best = stand_pat
+                if best > alpha:
+                    alpha = best
+            else:
+                if stand_pat <= alpha:
+                    return stand_pat
+                best = stand_pat
+                if best < beta:
+                    beta = best
+
+            # Build pseudo-legal capture list directly — no generate_all_legal_moves().
+            # Old path: generate ALL legal moves (make_move+is_in_check per pseudo-move)
+            # then filter to captures.  New path: collect only capture candidates from
+            # pseudo-legal moves and do the legality check only for those.
+            board = self.board.board
+            captures = []
+            for r in range(8):
+                for c in range(8):
+                    piece = board[r][c]
+                    if piece == '.' or (is_white_turn != piece.isupper()):
+                        continue
+                    for move in self.get_capture_moves(r, c):
+                        captures.append(((r, c), move))
+
+            captures = self.order_moves(captures, is_white_turn)
+
+            if is_white_turn:
+                for (start, end) in captures:
+                    move_state = self.board.make_move(start, end)
+                    if self.is_in_check(is_white_turn):
+                        self.board.undo_move(start, end, move_state)
+                        continue
+                    score = self.quiescence(alpha, beta, False)
+                    self.board.undo_move(start, end, move_state)
+                    if score > best:
+                        best = score
+                    if best > alpha:
+                        alpha = best
+                    if alpha >= beta:
+                        break
+            else:
+                for (start, end) in captures:
+                    move_state = self.board.make_move(start, end)
+                    if self.is_in_check(is_white_turn):
+                        self.board.undo_move(start, end, move_state)
+                        continue
+                    score = self.quiescence(alpha, beta, True)
+                    self.board.undo_move(start, end, move_state)
+                    if score < best:
+                        best = score
+                    if best < beta:
+                        beta = best
+                    if beta <= alpha:
+                        break
+
+        finally:
+            self.board.turn = previous_turn
+
+        return best
 
     # ------------------------------------------------------------------
     # Minimax search
     # ------------------------------------------------------------------
 
     def minimax(self, depth, is_white_turn, alpha=float("-inf"), beta=float("inf")):
-        game_status = self.get_game_status()
-        if depth == 0 or game_status["is_over"]:
-            return self.evaluate_position(depth)
+        self.nodes_searched += 1
+        self.node_count += 1
+
+        # --- Cheap draw checks (no move generation needed) ---
+        if self.board.halfmove_clock >= 100:
+            return 0
 
         previous_turn = self.board.turn
         self.board.turn = "white" if is_white_turn else "black"
 
         try:
-            moves = self.generate_all_legal_moves(is_white_turn)
-            moves = self.order_moves(moves, is_white_turn)
+            in_check = self.is_in_check(is_white_turn)
+            if in_check:
+                depth += 1
 
+            alpha_orig = alpha
+            beta_orig  = beta
+
+            tt_key = self.board.zobrist_hash
+
+            if self.board.position_counts.get(tt_key, 0) >= 3:
+                return 0
+
+            tt_entry = self.transposition_table.get(tt_key)
+            tt_move = tt_entry[3] if tt_entry is not None and len(tt_entry) > 3 else None
+            if tt_entry is not None and tt_entry[0] >= depth:
+                tt_depth, tt_score, flag = tt_entry[:3]
+                if flag == self._TT_EXACT:
+                    return tt_score
+                elif flag == self._TT_LOWER:
+                    alpha = max(alpha, tt_score)
+                else:  # _TT_UPPER
+                    beta = min(beta, tt_score)
+                if alpha >= beta:
+                    return tt_score
+
+            if depth == 0 and not in_check:
+                return self.quiescence(alpha, beta, is_white_turn)
+
+            if (
+                depth >= 3
+                and not in_check
+                and self._can_null_move_prune(is_white_turn)
+            ):
+                previous_ep = self.board.en_passant_target
+                self.board.en_passant_target = None
+                try:
+                    if is_white_turn:
+                        null_score = self.minimax(depth - 3, False, beta - 1, beta)
+                    else:
+                        null_score = self.minimax(depth - 3, True, alpha, alpha + 1)
+                finally:
+                    self.board.en_passant_target = previous_ep
+
+                if is_white_turn:
+                    if null_score >= beta:
+                        return beta
+                else:
+                    if null_score <= alpha:
+                        return alpha
+
+            # Generate legal moves ONCE; terminal detection falls out for free.
+            moves = self.generate_all_legal_moves(is_white_turn)
+
+            if not moves:
+                # No legal moves → checkmate or stalemate; no further search needed.
+                if in_check:
+                    return (-self.MATE_SCORE + depth) if is_white_turn else (self.MATE_SCORE - depth)
+                return 0  # stalemate
+
+            if depth == 0:
+                if is_white_turn:
+                    best = float("-inf")
+                    for start, end in moves:
+                        move_state = self.board.make_move(start, end)
+                        score = self.quiescence(alpha, beta, False)
+                        self.board.undo_move(start, end, move_state)
+                        if score > best:
+                            best = score
+                        alpha = max(alpha, best)
+                        if alpha >= beta:
+                            break
+                    return best
+
+                best = float("inf")
+                for start, end in moves:
+                    move_state = self.board.make_move(start, end)
+                    score = self.quiescence(alpha, beta, True)
+                    self.board.undo_move(start, end, move_state)
+                    if score < best:
+                        best = score
+                    beta = min(beta, best)
+                    if beta <= alpha:
+                        break
+                return best
+
+            moves = self.order_moves(moves, is_white_turn, depth, tt_move)
+
+            best_move_local = None
             if is_white_turn:
                 best_score = float("-inf")
-                for (start, end) in moves:
+                for move_index, (start, end) in enumerate(moves):
+                    target = self.board.get_piece(end[0], end[1])
+                    is_capture = target != "." or (
+                        self.board.get_piece(start[0], start[1]).lower() == "p"
+                        and start[1] != end[1]
+                    )
+                    is_promotion = self.is_promotion_move(start, end)
                     move_state = self.board.make_move(start, end)
-                    score = self.minimax(depth - 1, False, alpha, beta)
+                    gives_check = False
+                    if move_index > 5 and depth >= 3 and not is_capture and not is_promotion:
+                        gives_check = self.is_in_check(False)
+
+                    if move_index > 5 and depth >= 3 and not is_capture and not is_promotion and not gives_check:
+                        score = self.minimax(depth - 2, False, alpha, beta)
+                        if score > alpha:
+                            score = self.minimax(depth - 1, False, alpha, beta)
+                    else:
+                        score = self.minimax(depth - 1, False, alpha, beta)
                     self.board.undo_move(start, end, move_state)
-                    best_score = max(best_score, score)
+                    if score > best_score:
+                        best_score      = score
+                        best_move_local = (start, end)
                     alpha = max(alpha, best_score)
                     if beta <= alpha:
+                        if not is_capture:
+                            self._store_killer(depth, (start, end))
+                            self._store_history(depth, (start, end))
                         break
             else:
                 best_score = float("inf")
-                for (start, end) in moves:
+                for move_index, (start, end) in enumerate(moves):
+                    target = self.board.get_piece(end[0], end[1])
+                    is_capture = target != "." or (
+                        self.board.get_piece(start[0], start[1]).lower() == "p"
+                        and start[1] != end[1]
+                    )
+                    is_promotion = self.is_promotion_move(start, end)
                     move_state = self.board.make_move(start, end)
-                    score = self.minimax(depth - 1, True, alpha, beta)
+                    gives_check = False
+                    if move_index > 5 and depth >= 3 and not is_capture and not is_promotion:
+                        gives_check = self.is_in_check(True)
+
+                    if move_index > 5 and depth >= 3 and not is_capture and not is_promotion and not gives_check:
+                        score = self.minimax(depth - 2, True, alpha, beta)
+                        if score < beta:
+                            score = self.minimax(depth - 1, True, alpha, beta)
+                    else:
+                        score = self.minimax(depth - 1, True, alpha, beta)
                     self.board.undo_move(start, end, move_state)
-                    best_score = min(best_score, score)
+                    if score < best_score:
+                        best_score      = score
+                        best_move_local = (start, end)
                     beta = min(beta, best_score)
                     if beta <= alpha:
+                        if not is_capture:
+                            self._store_killer(depth, (start, end))
+                            self._store_history(depth, (start, end))
                         break
+
+            # Mate scores are depth-dependent so skip caching them
+            if abs(best_score) < self.MATE_SCORE - 10:
+                if best_score <= alpha_orig:
+                    flag = self._TT_UPPER
+                elif best_score >= beta_orig:
+                    flag = self._TT_LOWER
+                else:
+                    flag = self._TT_EXACT
+                self.transposition_table[tt_key] = (depth, best_score, flag, best_move_local)
+
         finally:
             self.board.turn = previous_turn
 
         return best_score
 
     def find_best_move(self, depth, is_white_turn):
+        import time
+
         previous_turn = self.board.turn
         self.board.turn = "white" if is_white_turn else "black"
 
         try:
+            if self.in_opening:
+                book_move = get_book_move(self.board)
+                if book_move is not None:
+                    start, end = book_move
+                    if end in self.get_legal_moves(start[0], start[1]):
+                        return book_move, self.evaluate_position()
+                self.in_opening = False
+
             moves = self.generate_all_legal_moves(is_white_turn)
         finally:
             self.board.turn = previous_turn
@@ -525,58 +887,143 @@ class MoveGenerator:
             return None, self.evaluate_position()
 
         moves = self.order_moves(moves, is_white_turn)
-        best_move = None
+        best_move  = moves[0]
+        best_score = float("-inf") if is_white_turn else float("inf")
 
-        if is_white_turn:
-            best_score = float("-inf")
-            for (start, end) in moves:
-                self.board.turn = "white"
-                move_state = self.board.make_move(start, end)
-                score = self.minimax(depth - 1, False, best_score, float("inf"))
-                self.board.undo_move(start, end, move_state)
-                if score > best_score:
-                    best_score = score
-                    best_move = (start, end)
-        else:
-            best_score = float("inf")
-            for (start, end) in moves:
-                self.board.turn = "black"
-                move_state = self.board.make_move(start, end)
-                score = self.minimax(depth - 1, True, float("-inf"), best_score)
-                self.board.undo_move(start, end, move_state)
-                if score < best_score:
-                    best_score = score
-                    best_move = (start, end)
+        t0 = time.perf_counter()
+        self.nodes_searched = 0
+        self.node_count = 0
 
-        self.board.turn = previous_turn
+        try:
+            for current_depth in range(1, depth + 1):
+                depth_t0 = time.perf_counter()
+                depth_nodes_before = self.nodes_searched
+
+                # Put the previous iteration's best move first to improve pruning
+                moves.sort(key=lambda m: 0 if m == best_move else 1)
+
+                iter_best_move  = None
+                iter_best_score = float("-inf") if is_white_turn else float("inf")
+
+                if is_white_turn:
+                    for (start, end) in moves:
+                        self.board.turn = "white"
+                        move_state = self.board.make_move(start, end)
+                        score = self.minimax(current_depth - 1, False, iter_best_score, float("inf"))
+                        self.board.undo_move(start, end, move_state)
+                        if score > iter_best_score:
+                            iter_best_score = score
+                            iter_best_move  = (start, end)
+                else:
+                    for (start, end) in moves:
+                        self.board.turn = "black"
+                        move_state = self.board.make_move(start, end)
+                        score = self.minimax(current_depth - 1, True, float("-inf"), iter_best_score)
+                        self.board.undo_move(start, end, move_state)
+                        if score < iter_best_score:
+                            iter_best_score = score
+                            iter_best_move  = (start, end)
+
+                if iter_best_move is not None:
+                    best_move  = iter_best_move
+                    best_score = iter_best_score
+
+                dt = time.perf_counter() - depth_t0
+                depth_nodes = self.nodes_searched - depth_nodes_before
+                nps = int(depth_nodes / dt) if dt > 0 else 0
+                print(f"depth={current_depth:2d}  nodes={depth_nodes:>8,}  "
+                      f"time={dt:.3f}s  NPS={nps:>8,}  score={best_score:.3f}")
+
+        finally:
+            self.board.turn = previous_turn
+
+        total_t = time.perf_counter() - t0
+        total_nps = int(self.node_count / total_t) if total_t > 0 else 0
+        print(f"--- total nodes={self.node_count:,}  time={total_t:.3f}s  NPS={total_nps:,} ---")
+        print(f"Nodes: {self.node_count}")
+        print(f"Time: {total_t:.3f} seconds")
+        print(f"NPS: {total_nps}")
+
         return best_move, best_score
 
     def is_square_attacked(self, row, col, by_white):
-        for r in range(8):
-            for c in range(8):
-                piece = self.board.get_piece(r, c)
+        """
+        Reverse-ray attack detection: cast rays FROM the target square outward.
+        ~10-20x faster than the old approach of scanning all 64 squares and
+        generating each piece's full move list.
+        """
+        b = self.board.board
 
-                if piece == ".":
-                    continue
-
-                if by_white and not piece.isupper():
-                    continue
-                if not by_white and not piece.islower():
-                    continue
-
-                if self.piece_attacks_square(r, c, row, col):
+        # --- Knight attacks ---
+        for dr, dc in ((-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)):
+            r, c = row + dr, col + dc
+            if 0 <= r < 8 and 0 <= c < 8:
+                p = b[r][c]
+                if (by_white and p == 'N') or (not by_white and p == 'n'):
                     return True
+
+        # --- Pawn attacks (look in the direction pawns come FROM) ---
+        # White pawns attack upward (row decreases), so a white pawn threatening
+        # (row,col) sits one rank below: row+1.
+        pawn_dir = 1 if by_white else -1
+        for dc in (-1, 1):
+            r, c = row + pawn_dir, col + dc
+            if 0 <= r < 8 and 0 <= c < 8:
+                p = b[r][c]
+                if (by_white and p == 'P') or (not by_white and p == 'p'):
+                    return True
+
+        # --- King attacks ---
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                r, c = row + dr, col + dc
+                if 0 <= r < 8 and 0 <= c < 8:
+                    p = b[r][c]
+                    if (by_white and p == 'K') or (not by_white and p == 'k'):
+                        return True
+
+        # --- Rook / Queen rays (horizontal & vertical) ---
+        for dr, dc in ((-1,0),(1,0),(0,-1),(0,1)):
+            r, c = row + dr, col + dc
+            while 0 <= r < 8 and 0 <= c < 8:
+                p = b[r][c]
+                if p != '.':
+                    if by_white and p in ('R','Q'):
+                        return True
+                    if not by_white and p in ('r','q'):
+                        return True
+                    break
+                r, c = r + dr, c + dc
+
+        # --- Bishop / Queen rays (diagonal) ---
+        for dr, dc in ((-1,-1),(-1,1),(1,-1),(1,1)):
+            r, c = row + dr, col + dc
+            while 0 <= r < 8 and 0 <= c < 8:
+                p = b[r][c]
+                if p != '.':
+                    if by_white and p in ('B','Q'):
+                        return True
+                    if not by_white and p in ('b','q'):
+                        return True
+                    break
+                r, c = r + dr, c + dc
 
         return False
 
     def find_king(self, is_white):
-        target = "K" if is_white else "k"
-
+        # O(1) in the search (make_move/undo_move keep the cache current).
+        # Falls back to an O(64) scan when the board was assigned directly (e.g. in
+        # tests) so the cached position no longer matches the actual board state.
+        king_char = 'K' if is_white else 'k'
+        pos = self.board.white_king_pos if is_white else self.board.black_king_pos
+        if pos is not None and self.board.board[pos[0]][pos[1]] == king_char:
+            return pos
         for r in range(8):
             for c in range(8):
-                if self.board.get_piece(r, c) == target:
+                if self.board.board[r][c] == king_char:
                     return (r, c)
-
         return None
 
     def is_in_check(self, is_white):
@@ -658,43 +1105,36 @@ class MoveGenerator:
     def is_threefold_repetition(self):
         return self.board.position_counts.get(self.board.get_position_key(), 0) >= 3
 
+    def _evaluate_material(self):
+        score = 0
+        board = self.board.board
+        eval_table = self.EVAL_TABLE
+
+        for row in range(8):
+            row_data = board[row]
+            row_table = eval_table[row]
+            for col in range(8):
+                score += row_table[col][row_data[col]]
+
+        return score
+
     def evaluate_position(self, depth=0):
-        game_status = self.get_game_status()
         side_to_move_is_white = self.board.turn == "white"
 
-        if game_status["result"] == "checkmate":
+        if self.is_checkmate(side_to_move_is_white):
             if side_to_move_is_white:
                 return -self.MATE_SCORE + depth
             return self.MATE_SCORE - depth
 
-        if game_status["is_over"]:
+        if (
+            self.is_stalemate(side_to_move_is_white)
+            or self.is_fifty_move_draw()
+            or self.is_threefold_repetition()
+            or self.is_insufficient_material()
+        ):
             return 0
 
-        score = 0
-
-        for row in range(8):
-            for col in range(8):
-                piece = self.board.get_piece(row, col)
-                if piece == ".":
-                    continue
-
-                piece_type = piece.lower()
-                material = self.PIECE_VALUES[piece_type]
-                pst_row = row if piece.isupper() else 7 - row
-                positional = self.PST[piece_type][pst_row][col]
-
-                if piece.isupper():
-                    score += material + positional
-                else:
-                    score -= material + positional
-
-        # Reward leaving the opponent in check at leaf nodes
-        if self.is_in_check(False):   # black king in check
-            score += self.CHECK_BONUS
-        if self.is_in_check(True):    # white king in check
-            score -= self.CHECK_BONUS
-
-        return score
+        return self._evaluate_material()
 
     def get_game_status(self):
         side_to_move_is_white = self.board.turn == "white"
