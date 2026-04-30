@@ -400,7 +400,7 @@ class MoveGenerator:
             self.board.turn = previous_turn
 
         if not moves:
-            return None
+            return None, self.evaluate_position()
 
         best_move = None
 
@@ -426,7 +426,7 @@ class MoveGenerator:
                     best_move = (start, end)
 
         self.board.turn = previous_turn
-        return best_move
+        return best_move, best_score
 
     def is_square_attacked(self, row, col, by_white):
         for r in range(8):
