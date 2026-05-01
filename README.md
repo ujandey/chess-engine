@@ -22,6 +22,18 @@ Run tests:
 py -m pytest
 ```
 
+Run benchmark/perft smoke tests:
+
+```bash
+py benchmark.py --perft-depth 3 --search-depth 5 --movetime 1.0
+```
+
+Run the UCI engine:
+
+```bash
+py -m engine.uci
+```
+
 ## Project Structure
 
 ```text
@@ -34,7 +46,8 @@ chess-engine/
 |   |-- board.py                # Board state, FEN, Zobrist hash, reversible moves
 |   |-- move_generator.py       # Move generation, search, pruning, evaluation
 |   |-- opening_book.py         # Polyglot book loading and weighted move choice
-|   `-- notation.py             # Standard Algebraic Notation
+|   |-- notation.py             # Standard Algebraic Notation
+|   `-- uci.py                  # UCI protocol loop
 |-- ui/
 |   `-- gui.py                  # Tkinter board, eval bar, move history
 `-- tests/
@@ -53,7 +66,7 @@ chess-engine/
 - Background engine search so the GUI stays responsive.
 - Best-move arrow and evaluation bar.
 - Polyglot opening book support via `Titans/Titans.bin`.
-- Search depth is currently `5` in the GUI.
+- Search depth is currently `5` in the GUI, with time-controlled search available through the engine/UCI API.
 
 ## Opening Book
 
@@ -90,7 +103,7 @@ Important board state:
 - `black_king_pos`
 - Zobrist piece hash
 
-`make_move()` and `undo_move()` are fully reversible and restore board contents, castling rights, en passant target, halfmove clock, king caches, and Zobrist hash.
+`make_move()` and `undo_move()` are fully reversible and restore board contents, castling rights, en passant target, halfmove clock, king caches, piece-position caches, and Zobrist hash.
 
 ## Zobrist Hashing
 
@@ -115,7 +128,7 @@ The piece hash is updated incrementally in `make_move()` for:
 
 ## Search
 
-The engine uses iterative deepening at the root, alpha-beta minimax, transposition table lookup, quiescence search, and move ordering.
+The engine uses iterative deepening at the root, negamax/PVS, transposition table lookup, quiescence search, and move ordering.
 
 Search instrumentation prints:
 
@@ -134,11 +147,17 @@ Search optimizations:
 - Killer move heuristic.
 - History heuristic.
 - Quiescence search with capture-only move generation.
+- Static exchange filtering for clearly bad quiescence captures.
 - Null move pruning with a material safety guard.
 - Late move reductions with a conservative safety threshold.
+- Time-controlled iterative deepening.
 - Check extensions: positions where the side to move is in check search one ply deeper.
-- Cached king positions and reverse-ray attack detection.
+- Cached king/piece positions and reverse-ray attack detection.
 - Precomputed evaluation table for fast material and piece-square scoring.
+
+## Measurement
+
+`MoveGenerator.perft()` and `MoveGenerator.perft_divide()` are available for move-generation validation. The `benchmark.py` script runs fixed-position perft and search benchmarks.
 
 ## Pruning Safety Layer
 
@@ -154,6 +173,8 @@ This keeps depth 5 practical while preserving more tactical reliability than a m
 ## Evaluation
 
 Evaluation is material plus piece-square tables from White's perspective. Public `evaluate_position(depth=0)` remains terminal-aware so checkmates and draws are scored correctly, while `_evaluate_material()` is used in hot search paths.
+
+Additional evaluation terms include bishop pair, pawn structure, passed pawns, rook files, tapered endgame king activity, mobility, king pressure, and king safety.
 
 Mate scores are depth-adjusted around `+/-1000`, so the engine prefers faster mates and delays losing ones.
 

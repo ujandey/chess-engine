@@ -1,4 +1,10 @@
+import time
+
 from engine.opening_book import get_book_move
+
+
+class SearchTimeout(Exception):
+    pass
 
 
 class MoveGenerator:
@@ -112,6 +118,10 @@ class MoveGenerator:
         self.nodes_searched = 0
         self.node_count = 0
         self.in_opening = True
+        self.search_deadline = None
+        self.stop_search = False
+        self.last_completed_depth = 0
+        self.last_search_time = 0.0
         if MoveGenerator.EVAL_TABLE is None:
             MoveGenerator.EVAL_TABLE = self._build_eval_table()
 
@@ -517,22 +527,54 @@ class MoveGenerator:
     def generate_all_legal_moves(self, is_white):
         moves = []
 
-        for r in range(8):
-            for c in range(8):
-                piece = self.board.get_piece(r, c)
+        for r, c in self.board.iter_side_pieces(is_white):
+            piece = self.board.get_piece(r, c)
+            if piece == "." or piece.isupper() != is_white:
+                self.board.refresh_zobrist_hash()
+                return self.generate_all_legal_moves(is_white)
 
-                if piece == ".":
-                    continue
-
-                if is_white and piece.islower():
-                    continue
-                if not is_white and piece.isupper():
-                    continue
-
-                for move in self.get_legal_moves(r, c):
-                    moves.append(((r, c), move))
+            for move in self.get_legal_moves(r, c):
+                moves.append(((r, c), move))
 
         return moves
+
+    def perft(self, depth, is_white=None):
+        if is_white is None:
+            is_white = self.board.turn == "white"
+
+        if depth == 0:
+            return 1
+
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white else "black"
+        nodes = 0
+        try:
+            for start, end in self.generate_all_legal_moves(is_white):
+                move_state = self.board.make_move(start, end)
+                nodes += self.perft(depth - 1, not is_white)
+                self.board.undo_move(start, end, move_state)
+        finally:
+            self.board.turn = previous_turn
+
+        return nodes
+
+    def perft_divide(self, depth, is_white=None):
+        if is_white is None:
+            is_white = self.board.turn == "white"
+
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white else "black"
+        results = []
+        try:
+            for start, end in self.generate_all_legal_moves(is_white):
+                move_state = self.board.make_move(start, end)
+                nodes = self.perft(depth - 1, not is_white)
+                self.board.undo_move(start, end, move_state)
+                results.append((start, end, nodes))
+        finally:
+            self.board.turn = previous_turn
+
+        return results
 
     # ------------------------------------------------------------------
     # Move ordering
@@ -614,7 +656,7 @@ class MoveGenerator:
         )
 
     # ------------------------------------------------------------------
-    # Quiescence search
+    # Quiescence search 
     # ------------------------------------------------------------------
 
     def quiescence(self, alpha, beta, is_white_turn):
@@ -952,6 +994,307 @@ class MoveGenerator:
 
         return best_move, best_score
 
+    def _check_search_timeout(self):
+        if self.stop_search:
+            raise SearchTimeout()
+        if self.search_deadline is not None and time.perf_counter() >= self.search_deadline:
+            raise SearchTimeout()
+
+    def _side_multiplier(self, is_white_turn):
+        return 1 if is_white_turn else -1
+
+    def _evaluate_for_side(self, is_white_turn):
+        return self._evaluate_material() * self._side_multiplier(is_white_turn)
+
+    def static_exchange_eval(self, start, end):
+        sr, sc = start
+        er, ec = end
+        mover = self.board.get_piece(sr, sc)
+        target = self.board.get_piece(er, ec)
+
+        if target == "." and not (mover.lower() == "p" and sc != ec):
+            return 0.0
+
+        victim_value = self.PIECE_VALUES.get(target.lower(), 1 if target == "." else 0)
+        attacker_value = self.PIECE_VALUES.get(mover.lower(), 0)
+        gain = victim_value - attacker_value
+
+        move_state = self.board.make_move(start, end)
+        try:
+            occupied_by_white = mover.isupper()
+            if self.is_square_attacked(er, ec, by_white=not occupied_by_white):
+                cheapest_recapture = 9
+                for r, c in self.board.iter_side_pieces(not occupied_by_white):
+                    piece = self.board.get_piece(r, c)
+                    if piece != "." and self.piece_attacks_square(r, c, er, ec):
+                        cheapest_recapture = min(
+                            cheapest_recapture,
+                            self.PIECE_VALUES.get(piece.lower(), 0),
+                        )
+                gain -= min(attacker_value, cheapest_recapture)
+        finally:
+            self.board.undo_move(start, end, move_state)
+
+        return gain
+
+    def quiescence(self, alpha, beta, is_white_turn):
+        self.nodes_searched += 1
+        self.node_count += 1
+        if (self.node_count & 2047) == 0:
+            self._check_search_timeout()
+
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white_turn else "black"
+
+        try:
+            stand_pat = self._evaluate_for_side(is_white_turn)
+            if stand_pat >= beta:
+                return beta
+            best = stand_pat
+            if best > alpha:
+                alpha = best
+
+            captures = []
+            for r, c in self.board.iter_side_pieces(is_white_turn):
+                piece = self.board.get_piece(r, c)
+                if piece == "." or piece.isupper() != is_white_turn:
+                    continue
+                for move in self.get_capture_moves(r, c):
+                    captures.append(((r, c), move))
+
+            captures = self.order_moves(captures, is_white_turn)
+
+            for start, end in captures:
+                if not self.is_promotion_move(start, end) and self.static_exchange_eval(start, end) < -0.20:
+                    continue
+
+                move_state = self.board.make_move(start, end)
+                if self.is_in_check(is_white_turn):
+                    self.board.undo_move(start, end, move_state)
+                    continue
+                score = -self.quiescence(-beta, -alpha, not is_white_turn)
+                self.board.undo_move(start, end, move_state)
+                if score > best:
+                    best = score
+                if best > alpha:
+                    alpha = best
+                if alpha >= beta:
+                    break
+        finally:
+            self.board.turn = previous_turn
+
+        return best
+
+    def minimax(self, depth, is_white_turn, alpha=float("-inf"), beta=float("inf")):
+        score = self.negamax(depth, is_white_turn, alpha, beta)
+        return score if is_white_turn else -score
+
+    def negamax(self, depth, is_white_turn, alpha=float("-inf"), beta=float("inf"), allow_null=True):
+        self.nodes_searched += 1
+        self.node_count += 1
+        if (self.node_count & 2047) == 0:
+            self._check_search_timeout()
+
+        if self.board.halfmove_clock >= 100:
+            return 0
+
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white_turn else "black"
+
+        try:
+            in_check = self.is_in_check(is_white_turn)
+            if in_check:
+                depth += 1
+
+            alpha_orig = alpha
+            beta_orig = beta
+            tt_key = self.board.zobrist_hash
+
+            if self.board.position_counts.get(tt_key, 0) >= 3:
+                return 0
+
+            tt_entry = self.transposition_table.get(tt_key)
+            tt_move = tt_entry[3] if tt_entry is not None and len(tt_entry) > 3 else None
+            if tt_entry is not None and tt_entry[0] >= depth:
+                _, tt_score, flag = tt_entry[:3]
+                if flag == self._TT_EXACT:
+                    return tt_score
+                if flag == self._TT_LOWER:
+                    alpha = max(alpha, tt_score)
+                else:
+                    beta = min(beta, tt_score)
+                if alpha >= beta:
+                    return tt_score
+
+            if depth == 0 and not in_check:
+                return self.quiescence(alpha, beta, is_white_turn)
+
+            if (
+                allow_null
+                and depth >= 3
+                and not in_check
+                and self._can_null_move_prune(is_white_turn)
+            ):
+                previous_ep = self.board.en_passant_target
+                self.board.en_passant_target = None
+                try:
+                    null_score = -self.negamax(depth - 3, not is_white_turn, -beta, -beta + 1, False)
+                finally:
+                    self.board.en_passant_target = previous_ep
+
+                if null_score >= beta:
+                    return beta
+
+            moves = self.generate_all_legal_moves(is_white_turn)
+            if not moves:
+                if in_check:
+                    return -self.MATE_SCORE - depth
+                return 0
+
+            moves = self.order_moves(moves, is_white_turn, depth, tt_move)
+
+            best_score = float("-inf")
+            best_move_local = None
+            for move_index, (start, end) in enumerate(moves):
+                target = self.board.get_piece(end[0], end[1])
+                mover = self.board.get_piece(start[0], start[1])
+                is_capture = target != "." or (mover.lower() == "p" and start[1] != end[1])
+                is_promotion = self.is_promotion_move(start, end)
+
+                move_state = self.board.make_move(start, end)
+                gives_check = False
+                if move_index > 5 and depth >= 3 and not is_capture and not is_promotion:
+                    gives_check = self.is_in_check(not is_white_turn)
+
+                next_depth = depth - 1
+                reduced = False
+                if move_index > 5 and depth >= 3 and not is_capture and not is_promotion and not gives_check:
+                    next_depth = depth - 2
+                    reduced = True
+
+                if move_index == 0:
+                    score = -self.negamax(next_depth, not is_white_turn, -beta, -alpha)
+                else:
+                    score = -self.negamax(next_depth, not is_white_turn, -alpha - 1, -alpha)
+                    if score > alpha and score < beta:
+                        score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha)
+
+                if reduced and score > alpha:
+                    score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha)
+
+                self.board.undo_move(start, end, move_state)
+                if score > best_score:
+                    best_score = score
+                    best_move_local = (start, end)
+                if best_score > alpha:
+                    alpha = best_score
+                if alpha >= beta:
+                    if not is_capture:
+                        self._store_killer(depth, (start, end))
+                        self._store_history(depth, (start, end))
+                    break
+
+            if abs(best_score) < self.MATE_SCORE - 10:
+                if best_score <= alpha_orig:
+                    flag = self._TT_UPPER
+                elif best_score >= beta_orig:
+                    flag = self._TT_LOWER
+                else:
+                    flag = self._TT_EXACT
+                self.transposition_table[tt_key] = (depth, best_score, flag, best_move_local)
+        finally:
+            self.board.turn = previous_turn
+
+        return best_score
+
+    def find_best_move(self, depth, is_white_turn, max_time=None, verbose=True):
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white_turn else "black"
+
+        try:
+            if self.in_opening:
+                book_move = get_book_move(self.board)
+                if book_move is not None:
+                    start, end = book_move
+                    if end in self.get_legal_moves(start[0], start[1]):
+                        return book_move, self.evaluate_position()
+                self.in_opening = False
+
+            moves = self.generate_all_legal_moves(is_white_turn)
+        finally:
+            self.board.turn = previous_turn
+
+        if not moves:
+            return None, self.evaluate_position()
+
+        moves = self.order_moves(moves, is_white_turn)
+        best_move = moves[0]
+        best_score = float("-inf")
+
+        t0 = time.perf_counter()
+        self.nodes_searched = 0
+        self.node_count = 0
+        self.last_completed_depth = 0
+        self.search_deadline = (t0 + max_time) if max_time is not None else None
+        self.stop_search = False
+
+        try:
+            for current_depth in range(1, depth + 1):
+                depth_t0 = time.perf_counter()
+                depth_nodes_before = self.nodes_searched
+                moves.sort(key=lambda m: 0 if m == best_move else 1)
+
+                iter_best_move = None
+                iter_best_score = float("-inf")
+                alpha = float("-inf")
+                beta = float("inf")
+
+                for move_index, (start, end) in enumerate(moves):
+                    self.board.turn = "white" if is_white_turn else "black"
+                    move_state = self.board.make_move(start, end)
+                    if move_index == 0:
+                        score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha)
+                    else:
+                        score = -self.negamax(current_depth - 1, not is_white_turn, -alpha - 1, -alpha)
+                        if score > alpha and score < beta:
+                            score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha)
+                    self.board.undo_move(start, end, move_state)
+
+                    if score > iter_best_score:
+                        iter_best_score = score
+                        iter_best_move = (start, end)
+                    if iter_best_score > alpha:
+                        alpha = iter_best_score
+
+                if iter_best_move is not None:
+                    best_move = iter_best_move
+                    best_score = iter_best_score
+                    self.last_completed_depth = current_depth
+
+                dt = time.perf_counter() - depth_t0
+                depth_nodes = self.nodes_searched - depth_nodes_before
+                nps = int(depth_nodes / dt) if dt > 0 else 0
+                if verbose:
+                    score_for_display = best_score if is_white_turn else -best_score
+                    print(f"depth={current_depth:2d}  nodes={depth_nodes:>8,}  "
+                          f"time={dt:.3f}s  NPS={nps:>8,}  score={score_for_display:.3f}")
+        except SearchTimeout:
+            pass
+        finally:
+            self.board.turn = previous_turn
+            self.search_deadline = None
+
+        total_t = time.perf_counter() - t0
+        self.last_search_time = total_t
+        total_nps = int(self.node_count / total_t) if total_t > 0 else 0
+        if verbose:
+            print(f"--- total nodes={self.node_count:,}  time={total_t:.3f}s  NPS={total_nps:,} ---")
+            print(f"Nodes: {self.node_count}")
+            print(f"Time: {total_t:.3f} seconds")
+            print(f"NPS: {total_nps}")
+
+        return best_move, best_score if is_white_turn else -best_score
+
     def is_square_attacked(self, row, col, by_white):
         """
         Reverse-ray attack detection: cast rays FROM the target square outward.
@@ -1123,6 +1466,9 @@ class MoveGenerator:
     _PAWN_SHIELD_BONUS = 0.15   # per pawn present in the king's two-rank shield zone
     _OPEN_FILE_PENALTY = 0.25   # shield file is fully open (no pawns either side)
     _SEMI_OPEN_PENALTY = 0.15   # shield file has enemy pawns but no friendly ones
+    _MOBILITY_WEIGHTS = {"n": 0.015, "b": 0.012, "r": 0.008, "q": 0.004}
+    _KING_PRESSURE_WEIGHTS = {"n": 0.08, "b": 0.07, "r": 0.10, "q": 0.16}
+    _ENDGAME_KING_ACTIVITY = 0.08
 
     def _evaluate_material(self):
         """
@@ -1184,8 +1530,11 @@ class MoveGenerator:
         score += self._evaluate_rooks(wpf, bpf)
 
         phase = self._game_phase(wnpm, bnpm)
+        score += self._evaluate_mobility()
+        score += self._evaluate_endgame_king_activity(phase)
         if phase < 0.95:
             score += self._evaluate_king_safety(wpf, bpf, phase)
+            score += self._evaluate_king_pressure(phase)
 
         return score
 
@@ -1291,6 +1640,72 @@ class MoveGenerator:
                         score -= ob
                     elif col not in bpf:
                         score -= sb
+
+        return score
+
+    def _evaluate_mobility(self):
+        score = 0.0
+        board = self.board.board
+        weights = self._MOBILITY_WEIGHTS
+        previous_turn = self.board.turn
+
+        try:
+            for row in range(8):
+                for col in range(8):
+                    piece = board[row][col]
+                    piece_type = piece.lower()
+                    if piece_type not in weights:
+                        continue
+                    self.board.turn = "white" if piece.isupper() else "black"
+                    mobility = len(self.get_piece_moves(row, col, ignore_turn=True))
+                    bonus = weights[piece_type] * mobility
+                    score += bonus if piece.isupper() else -bonus
+        finally:
+            self.board.turn = previous_turn
+
+        return score
+
+    def _evaluate_endgame_king_activity(self, phase):
+        if phase <= 0:
+            return 0.0
+
+        def centrality(pos):
+            row, col = pos
+            return 3.5 - (abs(row - 3.5) + abs(col - 3.5)) / 2.0
+
+        return (
+            centrality(self.board.white_king_pos)
+            - centrality(self.board.black_king_pos)
+        ) * self._ENDGAME_KING_ACTIVITY * phase
+
+    def _evaluate_king_pressure(self, phase):
+        mg = 1.0 - phase
+        if mg <= 0:
+            return 0.0
+
+        score = 0.0
+        white_king = self.board.white_king_pos
+        black_king = self.board.black_king_pos
+
+        def near_king(square, king_pos):
+            return abs(square[0] - king_pos[0]) <= 1 and abs(square[1] - king_pos[1]) <= 1
+
+        previous_turn = self.board.turn
+        try:
+            for row in range(8):
+                for col in range(8):
+                    piece = self.board.board[row][col]
+                    piece_type = piece.lower()
+                    if piece_type not in self._KING_PRESSURE_WEIGHTS:
+                        continue
+                    self.board.turn = "white" if piece.isupper() else "black"
+                    target_king = black_king if piece.isupper() else white_king
+                    attacks = self.get_piece_moves(row, col, ignore_turn=True)
+                    attacked_zone = sum(1 for square in attacks if near_king(square, target_king))
+                    pressure = attacked_zone * self._KING_PRESSURE_WEIGHTS[piece_type] * mg
+                    score += pressure if piece.isupper() else -pressure
+        finally:
+            self.board.turn = previous_turn
 
         return score
 

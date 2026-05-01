@@ -34,6 +34,7 @@ class Board:
         # Cached king positions — updated incrementally in make_move/undo_move
         self.white_king_pos = (7, 4)
         self.black_king_pos = (0, 4)
+        self.piece_positions = self.compute_piece_positions()
         self._piece_hash = self.compute_piece_hash()
         self.position_counts = {self.get_position_key(): 1}
 
@@ -63,6 +64,33 @@ class Board:
             piece_index = self.PIECE_TO_ZOBRIST_INDEX[piece]
             self._piece_hash ^= self.ZOBRIST_PIECES[row][col][piece_index]
 
+    def compute_piece_positions(self):
+        positions = {"white": set(), "black": set()}
+        for row in range(8):
+            for col in range(8):
+                piece = self.board[row][col]
+                if piece == ".":
+                    continue
+                side = "white" if piece.isupper() else "black"
+                positions[side].add((row, col))
+        return positions
+
+    def _remove_piece_position(self, piece, row, col):
+        if piece == ".":
+            return
+        side = "white" if piece.isupper() else "black"
+        self.piece_positions[side].discard((row, col))
+
+    def _add_piece_position(self, piece, row, col):
+        if piece == ".":
+            return
+        side = "white" if piece.isupper() else "black"
+        self.piece_positions[side].add((row, col))
+
+    def iter_side_pieces(self, is_white):
+        side = "white" if is_white else "black"
+        return tuple(self.piece_positions[side])
+
     def compute_piece_hash(self):
         piece_hash = 0
         for row in range(8):
@@ -75,6 +103,14 @@ class Board:
 
     def refresh_zobrist_hash(self):
         self._piece_hash = self.compute_piece_hash()
+        self.piece_positions = self.compute_piece_positions()
+        for row in range(8):
+            for col in range(8):
+                piece = self.board[row][col]
+                if piece == "K":
+                    self.white_king_pos = (row, col)
+                elif piece == "k":
+                    self.black_king_pos = (row, col)
 
     def get_castling_state_index(self):
         cr = self.castling_rights
@@ -142,6 +178,59 @@ class Board:
             f"{en_passant} {halfmove_clock} {fullmove_number}"
         )
 
+    def set_fen(self, fen):
+        fields = fen.strip().split()
+        if len(fields) < 4:
+            raise ValueError("FEN must include board, turn, castling, and en-passant fields")
+
+        board_field, active_color, castling_field, ep_field = fields[:4]
+        halfmove_clock = int(fields[4]) if len(fields) > 4 else 0
+
+        rows = board_field.split("/")
+        if len(rows) != 8:
+            raise ValueError("FEN board must contain 8 ranks")
+
+        board = []
+        white_king = None
+        black_king = None
+        for row_index, fen_row in enumerate(rows):
+            row = []
+            for char in fen_row:
+                if char.isdigit():
+                    row.extend(["."] * int(char))
+                elif char in self.PIECE_TO_ZOBRIST_INDEX:
+                    if char == "K":
+                        white_king = (row_index, len(row))
+                    elif char == "k":
+                        black_king = (row_index, len(row))
+                    row.append(char)
+                else:
+                    raise ValueError(f"Invalid FEN piece: {char}")
+            if len(row) != 8:
+                raise ValueError("Each FEN rank must contain 8 squares")
+            board.append(row)
+
+        if white_king is None or black_king is None:
+            raise ValueError("FEN must contain both kings")
+
+        self.board = board
+        self.turn = "white" if active_color == "w" else "black"
+        self.castling_rights = {
+            "white_kingside": "K" in castling_field,
+            "white_queenside": "Q" in castling_field,
+            "black_kingside": "k" in castling_field,
+            "black_queenside": "q" in castling_field,
+        }
+        if ep_field == "-":
+            self.en_passant_target = None
+        else:
+            self.en_passant_target = (8 - int(ep_field[1]), ord(ep_field[0]) - ord("a"))
+        self.halfmove_clock = halfmove_clock
+        self.white_king_pos = white_king
+        self.black_king_pos = black_king
+        self.refresh_zobrist_hash()
+        self.position_counts = {self.get_position_key(): 1}
+
     def get_position_key(self):
         return self.zobrist_hash
 
@@ -191,8 +280,10 @@ class Board:
         promoted_from = None
 
         self._xor_piece_hash(piece, sr, sc)
+        self._remove_piece_position(piece, sr, sc)
         if captured != ".":
             self._xor_piece_hash(captured, er, ec)
+            self._remove_piece_position(captured, er, ec)
 
         if piece == "K":
             self.castling_rights["white_kingside"] = False
@@ -216,6 +307,7 @@ class Board:
             capture_row = sr
             captured = self.board[capture_row][ec]
             self._xor_piece_hash(captured, capture_row, ec)
+            self._remove_piece_position(captured, capture_row, ec)
             self.board[capture_row][ec] = "."
             en_passant_capture = ((capture_row, ec), captured)
 
@@ -230,6 +322,7 @@ class Board:
             promoted_from = "p"
 
         self._xor_piece_hash(self.board[er][ec], er, ec)
+        self._add_piece_position(self.board[er][ec], er, ec)
 
         if piece.lower() == "p" or captured != ".":
             self.halfmove_clock = 0
@@ -245,9 +338,11 @@ class Board:
             rook_end_col = 5 if ec > sc else 3
             rook_piece = self.board[er][rook_start_col]
             self._xor_piece_hash(rook_piece, er, rook_start_col)
+            self._remove_piece_position(rook_piece, er, rook_start_col)
             self.board[er][rook_start_col] = "."
             self.board[er][rook_end_col] = rook_piece
             self._xor_piece_hash(rook_piece, er, rook_end_col)
+            self._add_piece_position(rook_piece, er, rook_end_col)
             rook_move = ((er, rook_start_col), (er, rook_end_col))
 
         # Incrementally update cached king positions (O(1) vs O(64) scan)
@@ -289,15 +384,22 @@ class Board:
             rsr, rsc = rook_start
             rer, rec = rook_end
             rook_piece = self.board[rer][rec]
+            self._remove_piece_position(rook_piece, rer, rec)
             self.board[rer][rec] = "."
             self.board[rsr][rsc] = rook_piece
+            self._add_piece_position(rook_piece, rsr, rsc)
 
+        self._remove_piece_position(self.board[er][ec], er, ec)
         self.board[sr][sc] = piece
         self.board[er][ec] = captured
+        self._add_piece_position(piece, sr, sc)
+        self._add_piece_position(captured, er, ec)
         if en_passant_capture is not None:
             (capture_row, capture_col), captured_piece = en_passant_capture
+            self._remove_piece_position(captured, er, ec)
             self.board[er][ec] = "."
             self.board[capture_row][capture_col] = captured_piece
+            self._add_piece_position(captured_piece, capture_row, capture_col)
         self.castling_rights = move_state["previous_castling_rights"]
         self.en_passant_target = move_state["previous_en_passant_target"]
         self.halfmove_clock = move_state["previous_halfmove_clock"]

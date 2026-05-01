@@ -203,6 +203,7 @@ class ChessGUI:
         self.board.halfmove_clock = position["halfmove_clock"]
         self.board.castling_rights = position["castling_rights"].copy()
         self.board.position_counts = position["position_counts"].copy()
+        self.board.refresh_zobrist_hash()
 
     # --- game-tree navigation ---------------------------------------------
 
