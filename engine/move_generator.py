@@ -7,6 +7,12 @@ class MoveGenerator:
     _TT_EXACT = 0
     _TT_LOWER = 1  # failed high — score is a lower bound
     _TT_UPPER = 2  # failed low  — score is an upper bound
+
+    # Evaluation constants
+    _BISHOP_PAIR_BONUS = 0.30
+    _ISOLATED_PENALTY  = 0.20   # per isolated pawn
+    _DOUBLED_PENALTY   = 0.15   # per extra pawn on same file
+
     PIECE_VALUES = {
         "p": 1,
         "n": 3,
@@ -1105,16 +1111,231 @@ class MoveGenerator:
     def is_threefold_repetition(self):
         return self.board.position_counts.get(self.board.get_position_key(), 0) >= 3
 
+    # Passed pawn bonuses indexed by advancement rank (0 = home, 6 = one step from promotion).
+    # White rank = 7 - row (row 6 → rank 1 start, row 1 → rank 6 near promo).
+    # Black rank = row   (row 1 → rank 1 start, row 6 → rank 6 near promo).
+    _PASSED_BONUS = [0.0, 0.10, 0.15, 0.20, 0.30, 0.45, 0.65, 0.0]
+
+    _ROOK_OPEN_FILE  = 0.20   # rook on a file with no pawns of either colour
+    _ROOK_SEMI_OPEN  = 0.10   # rook on a file clear of friendly pawns only
+
+    # King safety (all scaled by middlegame fraction so they fade to zero in endgames)
+    _PAWN_SHIELD_BONUS = 0.15   # per pawn present in the king's two-rank shield zone
+    _OPEN_FILE_PENALTY = 0.25   # shield file is fully open (no pawns either side)
+    _SEMI_OPEN_PENALTY = 0.15   # shield file has enemy pawns but no friendly ones
+
     def _evaluate_material(self):
+        """
+        Hot-path evaluation used by quiescence stand_pat and evaluate_position.
+        Single O(64) board scan accumulates:
+          - material + PST via precomputed EVAL_TABLE
+          - bishop counts for bishop pair bonus
+          - pawn file maps {col: [rows]} for structure, passed pawns, rooks, king safety
+          - non-pawn material totals for game-phase detection
+        """
         score = 0
         board = self.board.board
         eval_table = self.EVAL_TABLE
+
+        white_bishops = 0
+        black_bishops = 0
+        wpf = {}   # col -> [rows] of white pawns on that file
+        bpf = {}   # col -> [rows] of black pawns on that file
+        wnpm = 0   # white non-pawn material in pawn units
+        bnpm = 0
 
         for row in range(8):
             row_data = board[row]
             row_table = eval_table[row]
             for col in range(8):
-                score += row_table[col][row_data[col]]
+                piece = row_data[col]
+                score += row_table[col][piece]
+                if piece == 'B':
+                    white_bishops += 1
+                    wnpm += 3
+                elif piece == 'b':
+                    black_bishops += 1
+                    bnpm += 3
+                elif piece == 'P':
+                    wpf.setdefault(col, []).append(row)
+                elif piece == 'p':
+                    bpf.setdefault(col, []).append(row)
+                elif piece == 'N':
+                    wnpm += 3
+                elif piece == 'n':
+                    bnpm += 3
+                elif piece == 'R':
+                    wnpm += 5
+                elif piece == 'r':
+                    bnpm += 5
+                elif piece == 'Q':
+                    wnpm += 9
+                elif piece == 'q':
+                    bnpm += 9
+
+        # Bishop pair bonus
+        if white_bishops >= 2:
+            score += self._BISHOP_PAIR_BONUS
+        if black_bishops >= 2:
+            score -= self._BISHOP_PAIR_BONUS
+
+        score += self._evaluate_pawn_structure(wpf, bpf)
+        score += self._evaluate_passed_pawns(wpf, bpf)
+        score += self._evaluate_rooks(wpf, bpf)
+
+        phase = self._game_phase(wnpm, bnpm)
+        if phase < 0.95:
+            score += self._evaluate_king_safety(wpf, bpf, phase)
+
+        return score
+
+    # ------------------------------------------------------------------
+    # Positional evaluation helpers (all called from _evaluate_material)
+    # ------------------------------------------------------------------
+
+    def _game_phase(self, wnpm, bnpm):
+        """
+        Phase fraction: 0.0 = full middlegame, 1.0 = full endgame.
+        Smooth linear blend — avoids eval cliffs at phase transitions.
+        Game-start npm ≈ 60; pure-endgame threshold ≈ 10.
+        """
+        return max(0.0, min(1.0, 1.0 - (wnpm + bnpm - 10.0) / 50.0))
+
+    def _evaluate_pawn_structure(self, wpf, bpf):
+        """
+        Isolated and doubled pawn penalties. Returns White-perspective score.
+        wpf/bpf: {col: [rows]} built in _evaluate_material.
+        """
+        score = 0.0
+        ip = self._ISOLATED_PENALTY
+        dp = self._DOUBLED_PENALTY
+
+        for col, rows in wpf.items():
+            cnt = len(rows)
+            if (col - 1) not in wpf and (col + 1) not in wpf:
+                score -= ip * cnt
+            if cnt > 1:
+                score -= dp * (cnt - 1)
+
+        for col, rows in bpf.items():
+            cnt = len(rows)
+            if (col - 1) not in bpf and (col + 1) not in bpf:
+                score += ip * cnt
+            if cnt > 1:
+                score += dp * (cnt - 1)
+
+        return score
+
+    def _evaluate_passed_pawns(self, wpf, bpf):
+        """
+        Bonus for pawns with no enemy pawn blocking or guarding ahead on same/adjacent files.
+        White pawns advance toward row 0; black toward row 7.
+        Rank index convention: white rank = 7-row, black rank = row
+          (both give index 1 at starting rank, 6 near promotion).
+        Returns White-perspective score.
+        """
+        score = 0.0
+        bonus = self._PASSED_BONUS
+
+        for col, rows in wpf.items():
+            for row in rows:
+                passed = True
+                for r in range(row - 1, -1, -1):
+                    for dc in (-1, 0, 1):
+                        c2 = col + dc
+                        if 0 <= c2 < 8 and c2 in bpf and r in bpf[c2]:
+                            passed = False
+                            break
+                    if not passed:
+                        break
+                if passed:
+                    score += bonus[7 - row]
+
+        for col, rows in bpf.items():
+            for row in rows:
+                passed = True
+                for r in range(row + 1, 8):
+                    for dc in (-1, 0, 1):
+                        c2 = col + dc
+                        if 0 <= c2 < 8 and c2 in wpf and r in wpf[c2]:
+                            passed = False
+                            break
+                    if not passed:
+                        break
+                if passed:
+                    score -= bonus[row]
+
+        return score
+
+    def _evaluate_rooks(self, wpf, bpf):
+        """
+        Bonus for rooks on open or semi-open files.
+        Complements the rook PST (which rewards rank but not file openness).
+        Returns White-perspective score.
+        """
+        score = 0.0
+        board = self.board.board
+        ob = self._ROOK_OPEN_FILE
+        sb = self._ROOK_SEMI_OPEN
+
+        for row in range(8):
+            for col in range(8):
+                piece = board[row][col]
+                if piece == 'R':
+                    if col not in wpf and col not in bpf:
+                        score += ob
+                    elif col not in wpf:
+                        score += sb
+                elif piece == 'r':
+                    if col not in wpf and col not in bpf:
+                        score -= ob
+                    elif col not in bpf:
+                        score -= sb
+
+        return score
+
+    def _evaluate_king_safety(self, wpf, bpf, phase):
+        """
+        Pawn-shield + open-file penalties for the king, scaled by middlegame fraction.
+        Uses cached king positions (O(1)) and pawn file maps from the main scan.
+        Known limitation: does not model enemy piece attack pressure — only pawn shield.
+        """
+        mg = 1.0 - phase   # 1.0 in pure middlegame, 0.0 in pure endgame
+        shield_b = self._PAWN_SHIELD_BONUS * mg
+        open_p   = self._OPEN_FILE_PENALTY * mg
+        semi_p   = self._SEMI_OPEN_PENALTY * mg
+        board = self.board.board
+        score = 0.0
+
+        def side_score(kr, kc, f_pawn, f_files, e_files, direction):
+            s = 0.0
+            sr1 = kr + direction
+            sr2 = kr + 2 * direction
+            for dc in (-1, 0, 1):
+                c2 = kc + dc
+                if not (0 <= c2 < 8):
+                    continue
+                has_shield = (
+                    (0 <= sr1 < 8 and board[sr1][c2] == f_pawn) or
+                    (0 <= sr2 < 8 and board[sr2][c2] == f_pawn)
+                )
+                if has_shield:
+                    s += shield_b
+                else:
+                    f_here = c2 in f_files
+                    e_here = c2 in e_files
+                    if not f_here and not e_here:
+                        s -= open_p
+                    elif not f_here:
+                        s -= semi_p
+            return s
+
+        wkr, wkc = self.board.white_king_pos
+        bkr, bkc = self.board.black_king_pos
+        # White king shields are on rows with LOWER index (toward rank 8), direction = -1
+        score += side_score(wkr, wkc, 'P', wpf, bpf, -1)
+        # Black king shields are on rows with HIGHER index (toward rank 1), direction = +1
+        score -= side_score(bkr, bkc, 'p', bpf, wpf, +1)
 
         return score
 
