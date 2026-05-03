@@ -43,6 +43,18 @@ def _score_to_ratio(score):
     return 0.5 + 0.5 * math.tanh(score / 4.0)
 
 
+def _board_from_snapshot(snapshot):
+    board = Board()
+    board.board = [row[:] for row in snapshot["board"]]
+    board.turn = snapshot["turn"]
+    board.en_passant_target = snapshot["en_passant_target"]
+    board.halfmove_clock = snapshot["halfmove_clock"]
+    board.castling_rights = snapshot["castling_rights"].copy()
+    board.position_counts = snapshot["position_counts"].copy()
+    board.refresh_zobrist_hash()
+    return board
+
+
 # ---------------------------------------------------------------------------
 # Game-tree node
 # ---------------------------------------------------------------------------
@@ -494,12 +506,15 @@ class ChessGUI:
     # --- engine search ----------------------------------------------------
 
     def _start_engine_search(self):
-        if self.mg.get_game_status()["is_over"]:
-            self.best_move = None
-            self.draw_board()
-            return
         self._search_generation += 1
         generation = self._search_generation
+        game_status = self.mg.get_game_status()
+        if game_status["is_over"]:
+            self.best_move = None
+            self.draw_eval_bar(self.mg.evaluate_position())
+            self.draw_board()
+            return
+
         self.score_var.set("...")
         snapshot = self._capture()
         is_white = self.board.turn == "white"
@@ -510,14 +525,7 @@ class ChessGUI:
         ).start()
 
     def _engine_thread(self, snapshot, is_white, generation):
-        b = Board()
-        b.board = [row[:] for row in snapshot["board"]]
-        b.turn = snapshot["turn"]
-        b.en_passant_target = snapshot["en_passant_target"]
-        b.halfmove_clock = snapshot["halfmove_clock"]
-        b.castling_rights = snapshot["castling_rights"].copy()
-        b.position_counts = snapshot["position_counts"].copy()
-        mg = MoveGenerator(b)
+        mg = MoveGenerator(_board_from_snapshot(snapshot))
         best_move, score = mg.find_best_move(SEARCH_DEPTH, is_white)
         self.root.after(0, lambda: self._on_engine_done(best_move, score, generation))
 

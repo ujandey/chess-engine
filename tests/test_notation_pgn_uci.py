@@ -1,0 +1,176 @@
+import unittest
+
+from engine.board import Board
+from engine.move_generator import MoveGenerator
+from engine.notation import move_to_san
+from engine.uci import (
+    apply_uci_move,
+    configure_position,
+    coord_to_square,
+    move_to_uci,
+    parse_go,
+    square_to_coord,
+)
+from ui.gui import ChessGUI, GameNode
+
+
+def make_board(rows, turn="white", castling_rights=None, en_passant_target=None):
+    board = Board()
+    board.board = rows
+    board.turn = turn
+    board.castling_rights = castling_rights or {
+        "white_kingside": False,
+        "white_queenside": False,
+        "black_kingside": False,
+        "black_queenside": False,
+    }
+    board.en_passant_target = en_passant_target
+    board.refresh_zobrist_hash()
+    board.position_counts = {board.get_position_key(): 1}
+    return board
+
+
+class SanTests(unittest.TestCase):
+    def test_pawn_push_san(self):
+        board = Board()
+        mg = MoveGenerator(board)
+
+        self.assertEqual(move_to_san(board, mg, (6, 4), (4, 4)), "e4")
+
+    def test_castling_san(self):
+        board = make_board(
+            [
+                ["r", ".", ".", ".", "k", ".", ".", "r"],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                ["R", ".", ".", ".", "K", ".", ".", "R"],
+            ],
+            castling_rights={
+                "white_kingside": True,
+                "white_queenside": True,
+                "black_kingside": True,
+                "black_queenside": True,
+            },
+        )
+        mg = MoveGenerator(board)
+
+        self.assertEqual(move_to_san(board, mg, (7, 4), (7, 6)), "O-O")
+        self.assertEqual(move_to_san(board, mg, (7, 4), (7, 2)), "O-O-O")
+
+    def test_capture_promotion_and_checkmate_san(self):
+        board = make_board(
+            [
+                [".", "r", ".", ".", "k", ".", ".", "."],
+                ["P", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", "K", ".", ".", "."],
+            ]
+        )
+        mg = MoveGenerator(board)
+        self.assertEqual(move_to_san(board, mg, (1, 0), (0, 1), "N"), "axb8=N")
+
+        mate_board = make_board(
+            [
+                [".", ".", ".", ".", ".", ".", ".", "k"],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", "K", "Q", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+            ]
+        )
+        mate_mg = MoveGenerator(mate_board)
+
+        self.assertEqual(move_to_san(mate_board, mate_mg, (2, 6), (1, 6)), "Qg7#")
+
+    def test_piece_disambiguation_san(self):
+        board = make_board(
+            [
+                [".", ".", ".", ".", "k", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", "N", ".", ".", ".", "N", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", "K", ".", ".", "."],
+            ]
+        )
+        mg = MoveGenerator(board)
+
+        self.assertEqual(move_to_san(board, mg, (5, 5), (6, 3)), "Nfd2")
+
+
+class PgnVariationTests(unittest.TestCase):
+    def test_pgn_tokens_include_inline_variations(self):
+        root = GameNode({}, move_san="")
+        e4 = GameNode({}, move=((6, 4), (4, 4), None), move_san="e4", parent=root)
+        d4 = GameNode({}, move=((6, 3), (4, 3), None), move_san="d4", parent=root)
+        e5 = GameNode({}, move=((1, 4), (3, 4), None), move_san="e5", parent=e4)
+        root.children = [e4, d4]
+        e4.children = [e5]
+
+        gui = object.__new__(ChessGUI)
+
+        self.assertEqual(
+            gui._pgn_tokens(root, 1, True, after_var=False),
+            ["1.", "e4", "(", "1.", "d4", ")", "1...", "e5"],
+        )
+
+
+class UciParsingTests(unittest.TestCase):
+    def test_square_and_move_conversion(self):
+        self.assertEqual(square_to_coord((7, 4)), "e1")
+        self.assertEqual(coord_to_square("e4"), (4, 4))
+        self.assertEqual(move_to_uci(((6, 4), (4, 4))), "e2e4")
+        self.assertEqual(move_to_uci(None), "0000")
+
+    def test_parse_go_depth_and_movetime(self):
+        self.assertEqual(parse_go(["depth", "5"]), (5, None))
+        self.assertEqual(parse_go(["movetime", "250"]), (64, 0.25))
+        self.assertEqual(parse_go(["depth", "3", "movetime", "1"]), (3, 0.01))
+
+    def test_configure_position_startpos_with_moves(self):
+        board = Board()
+        mg = MoveGenerator(board)
+
+        configure_position(board, mg, ["startpos", "moves", "e2e4", "e7e5", "g1f3"])
+
+        self.assertEqual(board.get_piece(4, 4), "P")
+        self.assertEqual(board.get_piece(3, 4), "p")
+        self.assertEqual(board.get_piece(5, 5), "N")
+        self.assertEqual(board.turn, "black")
+        self.assertFalse(mg.in_opening)
+
+    def test_apply_uci_move_handles_promotion(self):
+        board = make_board(
+            [
+                [".", ".", ".", ".", "k", ".", ".", "."],
+                ["P", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", "K", ".", ".", "."],
+            ]
+        )
+
+        apply_uci_move(board, "a7a8n")
+
+        self.assertEqual(board.get_piece(0, 0), "N")
+        self.assertEqual(board.turn, "black")
+
+
+if __name__ == "__main__":
+    unittest.main()
