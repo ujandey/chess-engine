@@ -19,8 +19,12 @@ def coord_to_square(text):
 def move_to_uci(move):
     if move is None:
         return "0000"
-    start, end = move
-    return square_to_coord(start) + square_to_coord(end)
+    start, end = move[0], move[1]
+    promo = move[2] if len(move) > 2 else None
+    result = square_to_coord(start) + square_to_coord(end)
+    if promo is not None:
+        result += promo.lower()
+    return result
 
 
 def apply_uci_move(board, move_text):

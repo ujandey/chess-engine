@@ -533,8 +533,13 @@ class MoveGenerator:
                 self.board.refresh_zobrist_hash()
                 return self.generate_all_legal_moves(is_white)
 
-            for move in self.get_legal_moves(r, c):
-                moves.append(((r, c), move))
+            is_pawn = piece.lower() == "p"
+            for end in self.get_legal_moves(r, c):
+                if is_pawn and end[0] in (0, 7):
+                    for promo in ("Q", "R", "B", "N"):
+                        moves.append(((r, c), end, promo))
+                else:
+                    moves.append(((r, c), end, None))
 
         return moves
 
@@ -549,8 +554,8 @@ class MoveGenerator:
         self.board.turn = "white" if is_white else "black"
         nodes = 0
         try:
-            for start, end in self.generate_all_legal_moves(is_white):
-                move_state = self.board.make_move(start, end)
+            for start, end, promo in self.generate_all_legal_moves(is_white):
+                move_state = self.board.make_move(start, end, promo)
                 nodes += self.perft(depth - 1, not is_white)
                 self.board.undo_move(start, end, move_state)
         finally:
@@ -566,11 +571,11 @@ class MoveGenerator:
         self.board.turn = "white" if is_white else "black"
         results = []
         try:
-            for start, end in self.generate_all_legal_moves(is_white):
-                move_state = self.board.make_move(start, end)
+            for start, end, promo in self.generate_all_legal_moves(is_white):
+                move_state = self.board.make_move(start, end, promo)
                 nodes = self.perft(depth - 1, not is_white)
                 self.board.undo_move(start, end, move_state)
-                results.append((start, end, nodes))
+                results.append(((start, end, promo), nodes))
         finally:
             self.board.turn = previous_turn
 
@@ -609,8 +614,8 @@ class MoveGenerator:
 
         return side_non_pawn_material >= 7 and total_non_king_material >= 14
 
-    def _move_order_score(self, start, end, depth=0, tt_move=None):
-        move = (start, end)
+    def _move_order_score(self, start, end, promo=None, depth=0, tt_move=None):
+        move = (start, end, promo)
         if move == tt_move:
             return 1_000_000
 
@@ -636,7 +641,8 @@ class MoveGenerator:
             score += self.history.get(move, 0)
 
         if mover.lower() == "p" and (er == 0 or er == 7):
-            score += 90_000
+            promo_bonus = {"Q": 90_000, "N": 87_000, "R": 50_000, "B": 48_000}
+            score += promo_bonus.get(promo, 90_000)
 
         return score
 
@@ -651,7 +657,7 @@ class MoveGenerator:
     def order_moves(self, moves, is_white, depth=0, tt_move=None):
         return sorted(
             moves,
-            key=lambda m: self._move_order_score(m[0], m[1], depth, tt_move),
+            key=lambda m: self._move_order_score(m[0], m[1], m[2], depth, tt_move),
             reverse=True,
         )
 
@@ -720,16 +726,21 @@ class MoveGenerator:
                 piece = self.board.get_piece(r, c)
                 if piece == "." or piece.isupper() != is_white_turn:
                     continue
-                for move in self.get_capture_moves(r, c):
-                    captures.append(((r, c), move))
+                is_pawn = piece.lower() == "p"
+                for end in self.get_capture_moves(r, c):
+                    if is_pawn and end[0] in (0, 7):
+                        for promo in ("Q", "R", "B", "N"):
+                            captures.append(((r, c), end, promo))
+                    else:
+                        captures.append(((r, c), end, None))
 
             captures = self.order_moves(captures, is_white_turn)
 
-            for start, end in captures:
+            for start, end, promo in captures:
                 if not self.is_promotion_move(start, end) and self.static_exchange_eval(start, end) < -0.20:
                     continue
 
-                move_state = self.board.make_move(start, end)
+                move_state = self.board.make_move(start, end, promo)
                 if self.is_in_check(is_white_turn):
                     self.board.undo_move(start, end, move_state)
                     continue
@@ -816,13 +827,13 @@ class MoveGenerator:
 
             best_score = float("-inf")
             best_move_local = None
-            for move_index, (start, end) in enumerate(moves):
+            for move_index, (start, end, promo) in enumerate(moves):
                 target = self.board.get_piece(end[0], end[1])
                 mover = self.board.get_piece(start[0], start[1])
                 is_capture = target != "." or (mover.lower() == "p" and start[1] != end[1])
                 is_promotion = self.is_promotion_move(start, end)
 
-                move_state = self.board.make_move(start, end)
+                move_state = self.board.make_move(start, end, promo)
                 gives_check = False
                 if move_index > 5 and depth >= 3 and not is_capture and not is_promotion:
                     gives_check = self.is_in_check(not is_white_turn)
@@ -846,13 +857,13 @@ class MoveGenerator:
                 self.board.undo_move(start, end, move_state)
                 if score > best_score:
                     best_score = score
-                    best_move_local = (start, end)
+                    best_move_local = (start, end, promo)
                 if best_score > alpha:
                     alpha = best_score
                 if alpha >= beta:
                     if not is_capture:
-                        self._store_killer(depth, (start, end))
-                        self._store_history(depth, (start, end))
+                        self._store_killer(depth, (start, end, promo))
+                        self._store_history(depth, (start, end, promo))
                     break
 
             if abs(best_score) < self.MATE_SCORE - 10:
@@ -878,7 +889,9 @@ class MoveGenerator:
                 if book_move is not None:
                     start, end = book_move
                     if end in self.get_legal_moves(start[0], start[1]):
-                        return book_move, self.evaluate_position()
+                        piece = self.board.get_piece(start[0], start[1])
+                        promo = "Q" if piece.lower() == "p" and end[0] in (0, 7) else None
+                        return (start, end, promo), self.evaluate_position()
                 self.in_opening = False
 
             moves = self.generate_all_legal_moves(is_white_turn)
@@ -910,9 +923,9 @@ class MoveGenerator:
                 alpha = float("-inf")
                 beta = float("inf")
 
-                for move_index, (start, end) in enumerate(moves):
+                for move_index, (start, end, promo) in enumerate(moves):
                     self.board.turn = "white" if is_white_turn else "black"
-                    move_state = self.board.make_move(start, end)
+                    move_state = self.board.make_move(start, end, promo)
                     if move_index == 0:
                         score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha)
                     else:
@@ -923,7 +936,7 @@ class MoveGenerator:
 
                     if score > iter_best_score:
                         iter_best_score = score
-                        iter_best_move = (start, end)
+                        iter_best_move = (start, end, promo)
                     if iter_best_score > alpha:
                         alpha = iter_best_score
 
