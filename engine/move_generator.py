@@ -122,8 +122,14 @@ class MoveGenerator:
         self.stop_search = False
         self.last_completed_depth = 0
         self.last_search_time = 0.0
+        self.tt_max_entries = 64 * 1024 * 1024 // 300  # ~224K entries (64 MB default)
         if MoveGenerator.EVAL_TABLE is None:
             MoveGenerator.EVAL_TABLE = self._build_eval_table()
+
+    def set_hash_size(self, mb):
+        self.tt_max_entries = max(1000, mb * 1024 * 1024 // 300)
+        if len(self.transposition_table) > self.tt_max_entries:
+            self.transposition_table.clear()
 
     @classmethod
     def _build_eval_table(cls):
@@ -667,6 +673,50 @@ class MoveGenerator:
         if self.search_deadline is not None and time.perf_counter() >= self.search_deadline:
             raise SearchTimeout()
 
+    def _extract_pv(self, is_white_turn, max_depth, first_move=None):
+        """Walk TT from current position to build a PV line.
+
+        first_move: the root best move (not stored in TT by the root loop).
+        """
+        pv = []
+        states = []
+        seen = set()
+        cur_white = is_white_turn
+        orig_turn = self.board.turn
+        remaining = max_depth
+        try:
+            if first_move is not None and remaining > 0:
+                start, end, promo = first_move
+                self.board.turn = "white" if cur_white else "black"
+                state = self.board.make_move(start, end, promo)
+                states.append((start, end, state))
+                pv.append(first_move)
+                cur_white = not cur_white
+                remaining -= 1
+
+            for _ in range(remaining):
+                key = self.board.zobrist_hash
+                if key in seen:
+                    break
+                seen.add(key)
+                entry = self.transposition_table.get(key)
+                if entry is None or entry[3] is None:
+                    break
+                move = entry[3]
+                start, end, promo = move
+                self.board.turn = "white" if cur_white else "black"
+                state = self.board.make_move(start, end, promo)
+                states.append((start, end, state))
+                pv.append(move)
+                cur_white = not cur_white
+        except (IndexError, KeyError, TypeError, ValueError):
+            pass
+        finally:
+            for s, e, st in reversed(states):
+                self.board.undo_move(s, e, st)
+            self.board.turn = orig_turn
+        return pv
+
     def _side_multiplier(self, is_white_turn):
         return 1 if is_white_turn else -1
 
@@ -810,7 +860,9 @@ class MoveGenerator:
                 previous_ep = self.board.en_passant_target
                 self.board.en_passant_target = None
                 try:
-                    null_score = -self.negamax(depth - 3, not is_white_turn, -beta, -beta + 1, False)
+                    # Clamp beta so -beta+1 stays finite (float("-inf")+1 == -inf in Python)
+                    null_beta = min(beta, self.MATE_SCORE + depth + 1)
+                    null_score = -self.negamax(depth - 3, not is_white_turn, -null_beta, -null_beta + 1, False)
                 finally:
                     self.board.en_passant_target = previous_ep
 
@@ -873,13 +925,14 @@ class MoveGenerator:
                     flag = self._TT_LOWER
                 else:
                     flag = self._TT_EXACT
-                self.transposition_table[tt_key] = (depth, best_score, flag, best_move_local)
+                if len(self.transposition_table) < self.tt_max_entries:
+                    self.transposition_table[tt_key] = (depth, best_score, flag, best_move_local)
         finally:
             self.board.turn = previous_turn
 
         return best_score
 
-    def find_best_move(self, depth, is_white_turn, max_time=None, verbose=True):
+    def find_best_move(self, depth, is_white_turn, max_time=None, verbose=True, on_depth_complete=None):
         previous_turn = self.board.turn
         self.board.turn = "white" if is_white_turn else "black"
 
@@ -948,10 +1001,13 @@ class MoveGenerator:
                 dt = time.perf_counter() - depth_t0
                 depth_nodes = self.nodes_searched - depth_nodes_before
                 nps = int(depth_nodes / dt) if dt > 0 else 0
+                score_for_display = best_score if is_white_turn else -best_score
                 if verbose:
-                    score_for_display = best_score if is_white_turn else -best_score
                     print(f"depth={current_depth:2d}  nodes={depth_nodes:>8,}  "
                           f"time={dt:.3f}s  NPS={nps:>8,}  score={score_for_display:.3f}")
+                if on_depth_complete is not None:
+                    pv = self._extract_pv(is_white_turn, current_depth, first_move=best_move)
+                    on_depth_complete(current_depth, score_for_display, pv)
         except SearchTimeout:
             pass
         finally:

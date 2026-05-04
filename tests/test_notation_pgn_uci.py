@@ -136,9 +136,9 @@ class UciParsingTests(unittest.TestCase):
         self.assertEqual(move_to_uci(None), "0000")
 
     def test_parse_go_depth_and_movetime(self):
-        self.assertEqual(parse_go(["depth", "5"]), (5, None))
-        self.assertEqual(parse_go(["movetime", "250"]), (64, 0.25))
-        self.assertEqual(parse_go(["depth", "3", "movetime", "1"]), (3, 0.01))
+        self.assertEqual(parse_go(["depth", "5"], True), (5, None))
+        self.assertEqual(parse_go(["movetime", "250"], True), (64, 0.25))
+        self.assertEqual(parse_go(["depth", "3", "movetime", "1"], True), (3, 0.01))
 
     def test_configure_position_startpos_with_moves(self):
         board = Board()
@@ -166,7 +166,7 @@ class UciParsingTests(unittest.TestCase):
             ]
         )
 
-        apply_uci_move(board, "a7a8n")
+        apply_uci_move(board, None, "a7a8n")
 
         self.assertEqual(board.get_piece(0, 0), "N")
         self.assertEqual(board.turn, "black")
