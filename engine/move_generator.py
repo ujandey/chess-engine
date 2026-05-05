@@ -122,6 +122,7 @@ class MoveGenerator:
         self.stop_search = False
         self.last_completed_depth = 0
         self.last_search_time = 0.0
+        self.seldepth = 0
         self.tt_max_entries = 64 * 1024 * 1024 // 300  # ~224K entries (64 MB default)
         if MoveGenerator.EVAL_TABLE is None:
             MoveGenerator.EVAL_TABLE = self._build_eval_table()
@@ -754,9 +755,11 @@ class MoveGenerator:
 
         return gain
 
-    def quiescence(self, alpha, beta, is_white_turn):
+    def quiescence(self, alpha, beta, is_white_turn, ply=0):
         self.nodes_searched += 1
         self.node_count += 1
+        if ply > self.seldepth:
+            self.seldepth = ply
         if (self.node_count & 2047) == 0:
             self._check_search_timeout()
 
@@ -794,7 +797,7 @@ class MoveGenerator:
                 if self.is_in_check(is_white_turn):
                     self.board.undo_move(start, end, move_state)
                     continue
-                score = -self.quiescence(-beta, -alpha, not is_white_turn)
+                score = -self.quiescence(-beta, -alpha, not is_white_turn, ply + 1)
                 self.board.undo_move(start, end, move_state)
                 if score > best:
                     best = score
@@ -811,7 +814,7 @@ class MoveGenerator:
         score = self.negamax(depth, is_white_turn, alpha, beta)
         return score if is_white_turn else -score
 
-    def negamax(self, depth, is_white_turn, alpha=float("-inf"), beta=float("inf"), allow_null=True):
+    def negamax(self, depth, is_white_turn, alpha=float("-inf"), beta=float("inf"), allow_null=True, ply=0):
         self.nodes_searched += 1
         self.node_count += 1
         if (self.node_count & 2047) == 0:
@@ -849,7 +852,7 @@ class MoveGenerator:
                     return tt_score
 
             if depth == 0 and not in_check:
-                return self.quiescence(alpha, beta, is_white_turn)
+                return self.quiescence(alpha, beta, is_white_turn, ply + 1)
 
             if (
                 allow_null
@@ -862,7 +865,7 @@ class MoveGenerator:
                 try:
                     # Clamp beta so -beta+1 stays finite (float("-inf")+1 == -inf in Python)
                     null_beta = min(beta, self.MATE_SCORE + depth + 1)
-                    null_score = -self.negamax(depth - 3, not is_white_turn, -null_beta, -null_beta + 1, False)
+                    null_score = -self.negamax(depth - 3, not is_white_turn, -null_beta, -null_beta + 1, False, ply + 1)
                 finally:
                     self.board.en_passant_target = previous_ep
 
@@ -897,14 +900,14 @@ class MoveGenerator:
                     reduced = True
 
                 if move_index == 0:
-                    score = -self.negamax(next_depth, not is_white_turn, -beta, -alpha)
+                    score = -self.negamax(next_depth, not is_white_turn, -beta, -alpha, ply=ply + 1)
                 else:
-                    score = -self.negamax(next_depth, not is_white_turn, -alpha - 1, -alpha)
+                    score = -self.negamax(next_depth, not is_white_turn, -alpha - 1, -alpha, ply=ply + 1)
                     if score > alpha and score < beta:
-                        score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha)
+                        score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha, ply=ply + 1)
 
                 if reduced and score > alpha:
-                    score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha)
+                    score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha, ply=ply + 1)
 
                 self.board.undo_move(start, end, move_state)
                 if score > best_score:
@@ -969,6 +972,7 @@ class MoveGenerator:
             for current_depth in range(1, depth + 1):
                 depth_t0 = time.perf_counter()
                 depth_nodes_before = self.nodes_searched
+                self.seldepth = 0
                 moves.sort(key=lambda m: 0 if m == best_move else 1)
 
                 iter_best_move = None
@@ -980,11 +984,11 @@ class MoveGenerator:
                     self.board.turn = "white" if is_white_turn else "black"
                     move_state = self.board.make_move(start, end, promo)
                     if move_index == 0:
-                        score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha)
+                        score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha, ply=1)
                     else:
-                        score = -self.negamax(current_depth - 1, not is_white_turn, -alpha - 1, -alpha)
+                        score = -self.negamax(current_depth - 1, not is_white_turn, -alpha - 1, -alpha, ply=1)
                         if score > alpha and score < beta:
-                            score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha)
+                            score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha, ply=1)
                     self.board.undo_move(start, end, move_state)
 
                     if score > iter_best_score:
@@ -1001,13 +1005,13 @@ class MoveGenerator:
                 dt = time.perf_counter() - depth_t0
                 depth_nodes = self.nodes_searched - depth_nodes_before
                 nps = int(depth_nodes / dt) if dt > 0 else 0
-                score_for_display = best_score if is_white_turn else -best_score
                 if verbose:
+                    score_for_display = best_score if is_white_turn else -best_score
                     print(f"depth={current_depth:2d}  nodes={depth_nodes:>8,}  "
                           f"time={dt:.3f}s  NPS={nps:>8,}  score={score_for_display:.3f}")
                 if on_depth_complete is not None:
                     pv = self._extract_pv(is_white_turn, current_depth, first_move=best_move)
-                    on_depth_complete(current_depth, score_for_display, pv)
+                    on_depth_complete(current_depth, best_score, pv)
         except SearchTimeout:
             pass
         finally:

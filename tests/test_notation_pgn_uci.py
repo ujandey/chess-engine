@@ -140,6 +140,20 @@ class UciParsingTests(unittest.TestCase):
         self.assertEqual(parse_go(["movetime", "250"], True), (64, 0.25))
         self.assertEqual(parse_go(["depth", "3", "movetime", "1"], True), (3, 0.01))
 
+    def test_parse_go_infinite(self):
+        self.assertEqual(parse_go(["infinite"], True), (64, None))
+        self.assertEqual(parse_go(["infinite"], False), (64, None))
+
+    def test_parse_go_wtime_btime(self):
+        _, wt = parse_go(["wtime", "60000", "btime", "60000"], True)
+        self.assertIsNotNone(wt)
+        self.assertGreater(wt, 0.0)
+        self.assertLessEqual(wt, 30.0)
+
+        _, bt = parse_go(["wtime", "60000", "btime", "60000"], False)
+        self.assertIsNotNone(bt)
+        self.assertGreater(bt, 0.0)
+
     def test_configure_position_startpos_with_moves(self):
         board = Board()
         mg = MoveGenerator(board)
@@ -170,6 +184,24 @@ class UciParsingTests(unittest.TestCase):
 
         self.assertEqual(board.get_piece(0, 0), "N")
         self.assertEqual(board.turn, "black")
+
+    def test_apply_uci_move_rejects_invalid_promotion(self):
+        board = make_board(
+            [
+                [".", ".", ".", ".", "k", ".", ".", "."],
+                ["P", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", "K", ".", ".", "."],
+            ]
+        )
+        apply_uci_move(board, None, "a7a8x")
+        # pawn must still be on a7; move was rejected
+        self.assertEqual(board.get_piece(1, 0), "P")
+        self.assertEqual(board.turn, "white")
 
 
 if __name__ == "__main__":

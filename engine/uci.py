@@ -7,6 +7,8 @@ from engine.move_generator import MoveGenerator
 
 STARTPOS_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
+_VALID_PROMOS = frozenset("QRBN")
+
 _OPTIONS = {
     "Hash":          ("spin", 64,  1,    2048),  # (type, default, min, max)
     "Move Overhead": ("spin", 50,  0,    5000),
@@ -38,6 +40,10 @@ def apply_uci_move(board, mg, move_text):
     start = coord_to_square(move_text[:2])
     end = coord_to_square(move_text[2:4])
     promotion = move_text[4].upper() if len(move_text) > 4 else None
+
+    if promotion is not None and promotion not in _VALID_PROMOS:
+        print(f"info string illegal move ignored: {move_text}", flush=True)
+        return
 
     if mg is not None:
         is_white = board.turn == "white"
@@ -117,6 +123,9 @@ def parse_go(args, is_white):
     depth = 64
     movetime = None
 
+    if "infinite" in args:
+        return depth, None
+
     if "depth" in args:
         idx = args.index("depth")
         if idx + 1 < len(args):
@@ -149,8 +158,13 @@ def make_info_callback(mg, t0):
         nps = int(mg.node_count / (elapsed_ms / 1000.0))
         pv_str = " ".join(move_to_uci(m) for m in pv)
         score_str = _format_score(score)
-        line = (f"info depth {depth} score {score_str}"
-                f" nodes {mg.node_count} nps {nps} time {elapsed_ms}")
+        seldepth = max(depth, mg.seldepth)
+        hashfull = (
+            min(1000, int(len(mg.transposition_table) * 1000 / mg.tt_max_entries))
+            if mg.tt_max_entries else 0
+        )
+        line = (f"info depth {depth} seldepth {seldepth} score {score_str}"
+                f" nodes {mg.node_count} nps {nps} hashfull {hashfull} time {elapsed_ms}")
         if pv_str:
             line += f" pv {pv_str}"
         print(line, flush=True)
@@ -226,7 +240,9 @@ def main():
             if mg.last_completed_depth == 0 and best_move is not None:
                 elapsed_ms = max(1, int((time.perf_counter() - t0) * 1000))
                 pv_str = move_to_uci(best_move)
-                print(f"info depth 1 score {_format_score(score)}"
+                # score from find_best_move is white-perspective; flip to side-to-move perspective
+                mover_score = score if is_white else -score
+                print(f"info depth 1 seldepth 1 score {_format_score(mover_score)}"
                       f" nodes {mg.node_count} nps 0 time {elapsed_ms} pv {pv_str}", flush=True)
             print(f"bestmove {move_to_uci(best_move)}", flush=True)
 
