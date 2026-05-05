@@ -1,6 +1,7 @@
 import datetime
 import math
 import threading
+import time
 import tkinter as tk
 
 from engine.board import Board
@@ -96,6 +97,21 @@ class ChessGUI:
 
         self.best_move = None
         self._search_generation = 0
+        self.engine_thinking = False
+        self.board_flipped = False
+        self.clock_flag = None
+        self.mode_var = tk.StringVar(value="human_ai")
+        self.human_side_var = tk.StringVar(value="white")
+        self.time_control_var = tk.BooleanVar(value=False)
+        self.time_preset_var = tk.StringVar(value="5+0")
+        self.depth_var = tk.IntVar(value=SEARCH_DEPTH)
+        self.time_minutes_var = tk.IntVar(value=5)
+        self.increment_var = tk.IntVar(value=0)
+        self.white_clock_var = tk.StringVar()
+        self.black_clock_var = tk.StringVar()
+        self.white_time = 5 * 60.0
+        self.black_time = 5 * 60.0
+        self._last_clock_tick = time.perf_counter()
 
         board_size = 8 * SQUARE_SIZE
         self._build_layout(board_size)
@@ -107,6 +123,8 @@ class ChessGUI:
         self.draw_board()
         self.draw_eval_bar(0)
         self.update_history_panel()
+        self._update_clock_labels()
+        self.root.after(250, self._tick_clocks)
         self._start_engine_search()
 
     # --- layout construction ----------------------------------------------
@@ -182,6 +200,86 @@ class ChessGUI:
         self.history_text.bind("<Button-1>", self._on_history_click)
         self.history_text.bind("<Motion>",   self._on_history_motion)
 
+        controls = tk.Frame(hist_frame, bg=_PANEL_BG)
+        controls.pack(fill="x", pady=(8, 0))
+        controls.pack_configure(before=text_frame)
+
+        tk.Label(controls, text="GAME", bg=_PANEL_BG, fg=_DIM_FG,
+                 font=("Arial", 8, "bold"), anchor="w").pack(fill="x")
+        for label, value in (
+            ("Human vs AI", "human_ai"),
+            ("Human vs Human", "human_human"),
+            ("AI vs AI", "ai_ai"),
+        ):
+            tk.Radiobutton(
+                controls, text=label, value=value,
+                variable=self.mode_var, command=self.on_mode_changed,
+                bg=_PANEL_BG, fg=_PANEL_FG, selectcolor="#2A2A2A",
+                activebackground=_PANEL_BG, activeforeground=_PANEL_FG,
+                font=("Arial", 9), anchor="w",
+            ).pack(fill="x")
+
+        tk.Label(controls, text="Human color", bg=_PANEL_BG, fg=_DIM_FG,
+                 font=("Arial", 8, "bold"), anchor="w").pack(fill="x",
+                                                              pady=(6, 0))
+        side_row = tk.Frame(controls, bg=_PANEL_BG)
+        side_row.pack(fill="x")
+        for label, value in (("White", "white"), ("Black", "black")):
+            tk.Radiobutton(
+                side_row, text=label, value=value,
+                variable=self.human_side_var, command=self.on_side_changed,
+                bg=_PANEL_BG, fg=_PANEL_FG, selectcolor="#2A2A2A",
+                activebackground=_PANEL_BG, activeforeground=_PANEL_FG,
+                font=("Arial", 9),
+            ).pack(side="left")
+
+        tk.Label(controls, text="CLOCKS", bg=_PANEL_BG, fg=_DIM_FG,
+                 font=("Arial", 8, "bold"), anchor="w").pack(fill="x",
+                                                              pady=(6, 0))
+        tk.Checkbutton(
+            controls, text="Use time control", variable=self.time_control_var,
+            command=self.on_time_control_changed,
+            bg=_PANEL_BG, fg=_PANEL_FG, selectcolor="#2A2A2A",
+            activebackground=_PANEL_BG, activeforeground=_PANEL_FG,
+            font=("Arial", 9), anchor="w",
+        ).pack(fill="x")
+        tk.Label(controls, textvariable=self.white_clock_var,
+                 bg=_PANEL_BG, fg=_PANEL_FG, font=("Arial", 10, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(controls, textvariable=self.black_clock_var,
+                 bg=_PANEL_BG, fg=_PANEL_FG, font=("Arial", 10, "bold"),
+                 anchor="w").pack(fill="x", pady=(0, 6))
+
+        preset_row = tk.Frame(controls, bg=_PANEL_BG)
+        preset_row.pack(fill="x", pady=(0, 4))
+        tk.Label(preset_row, text="Control", bg=_PANEL_BG, fg=_PANEL_FG,
+                 font=("Arial", 9), width=7, anchor="w").pack(side="left")
+        tk.OptionMenu(
+            preset_row, self.time_preset_var,
+            "1+0", "2+1", "3+0", "3+2", "5+0", "5+3",
+            "10+0", "10+5", "15+10", "30+0", "Custom",
+            command=self.on_time_preset_changed,
+        ).pack(side="right", fill="x", expand=True)
+
+        settings = tk.Frame(controls, bg=_PANEL_BG)
+        settings.pack(fill="x", pady=(6, 0))
+        self._add_spinbox(settings, "Depth", self.depth_var, 1, 10)
+        self._add_spinbox(settings, "Time", self.time_minutes_var, 1, 180)
+        self._add_spinbox(settings, "Inc", self.increment_var, 0, 60)
+
+        button_row = tk.Frame(controls, bg=_PANEL_BG)
+        button_row.pack(fill="x", pady=(6, 0))
+        tk.Button(
+            button_row, text="New Game", command=self.new_game,
+            font=("Arial", 9), bg="#2A2A2A", fg="#CCCCCC",
+            activebackground="#3A3A3A", relief="flat", padx=4, pady=3,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 3))
+        tk.Button(
+            button_row, text="Flip", command=self.toggle_board_flip,
+            font=("Arial", 9), bg="#2A2A2A", fg="#CCCCCC",
+            activebackground="#3A3A3A", relief="flat", padx=4, pady=3,
+        ).pack(side="left", fill="x", expand=True, padx=(3, 0))
+
         self._pgn_btn = tk.Button(
             hist_frame, text="Copy PGN", command=self.export_pgn,
             font=("Arial", 9), bg="#2A2A2A", fg="#CCCCCC",
@@ -195,6 +293,170 @@ class ChessGUI:
             font=("Arial", 12), anchor="w", padx=8, pady=6,
         )
         self.status_label.pack(fill="x")
+
+    def _add_spinbox(self, parent, label, variable, from_, to):
+        row = tk.Frame(parent, bg=_PANEL_BG)
+        row.pack(fill="x", pady=1)
+        tk.Label(row, text=label, bg=_PANEL_BG, fg=_PANEL_FG,
+                 font=("Arial", 9), width=6, anchor="w").pack(side="left")
+        command = self._on_depth_changed if variable is self.depth_var else None
+        if variable in (self.time_minutes_var, self.increment_var):
+            command = lambda: self._sync_time_preset(trigger_reset=True)
+        tk.Spinbox(
+            row, from_=from_, to=to, textvariable=variable, width=5,
+            command=command,
+            font=("Arial", 9),
+        ).pack(side="right")
+
+    # --- game controls / clocks ------------------------------------------
+
+    def _safe_int_var(self, variable, default, min_value, max_value):
+        try:
+            value = int(variable.get())
+        except (tk.TclError, ValueError):
+            value = default
+        value = max(min_value, min(max_value, value))
+        variable.set(value)
+        return value
+
+    def _search_depth(self):
+        return self._safe_int_var(self.depth_var, SEARCH_DEPTH, 1, 10)
+
+    def _sync_time_preset(self, trigger_reset=False):
+        minutes = self._safe_int_var(self.time_minutes_var, 5, 1, 180)
+        increment = self._safe_int_var(self.increment_var, 0, 0, 60)
+        preset = f"{minutes}+{increment}"
+        known = {
+            "1+0", "2+1", "3+0", "3+2", "5+0", "5+3",
+            "10+0", "10+5", "15+10", "30+0",
+        }
+        self.time_preset_var.set(preset if preset in known else "Custom")
+        if trigger_reset:
+            self.on_time_control_changed()
+
+    def _clock_seconds(self):
+        self._sync_time_preset()
+        minutes = self._safe_int_var(self.time_minutes_var, 5, 1, 180)
+        return float(minutes * 60)
+
+    def _increment_seconds(self):
+        self._sync_time_preset()
+        return float(self._safe_int_var(self.increment_var, 0, 0, 60))
+
+    def _format_clock(self, seconds):
+        seconds = max(0, int(math.ceil(seconds)))
+        minutes, secs = divmod(seconds, 60)
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _clock_enabled(self):
+        return bool(self.time_control_var.get())
+
+    def _update_clock_labels(self):
+        if not self._clock_enabled():
+            self.white_clock_var.set("White  --:--")
+            self.black_clock_var.set("Black  --:--")
+            return
+        self.white_clock_var.set(f"White  {self._format_clock(self.white_time)}")
+        self.black_clock_var.set(f"Black  {self._format_clock(self.black_time)}")
+
+    def _settle_clock(self):
+        now = time.perf_counter()
+        elapsed = now - self._last_clock_tick
+        self._last_clock_tick = now
+        if not self._clock_enabled() or self.clock_flag or self.mg.get_game_status()["is_over"]:
+            return
+        if self.board.turn == "white":
+            self.white_time = max(0.0, self.white_time - elapsed)
+            if self.white_time <= 0:
+                self.clock_flag = "White flag fell. Black wins on time."
+        else:
+            self.black_time = max(0.0, self.black_time - elapsed)
+            if self.black_time <= 0:
+                self.clock_flag = "Black flag fell. White wins on time."
+
+    def _tick_clocks(self):
+        self._settle_clock()
+        self._update_clock_labels()
+        if self.clock_flag:
+            self.status_var.set(self.clock_flag)
+        self.root.after(250, self._tick_clocks)
+
+    def _engine_movetime(self):
+        if not self._clock_enabled():
+            return None
+        remaining = self.white_time if self.board.turn == "white" else self.black_time
+        increment = self._increment_seconds()
+        return max(0.05, min(5.0, remaining / 30.0 + increment * 0.5))
+
+    def _is_engine_turn(self):
+        mode = self.mode_var.get()
+        if mode == "ai_ai":
+            return True
+        if mode == "human_human":
+            return False
+        return self.board.turn != self.human_side_var.get()
+
+    def _on_depth_changed(self):
+        self.best_move = None
+        self._start_engine_search()
+
+    def on_side_changed(self):
+        if self.mode_var.get() == "human_ai":
+            self.board_flipped = self.human_side_var.get() == "black"
+        self.clear_selection()
+        self.draw_board()
+        self._start_engine_search()
+
+    def on_mode_changed(self):
+        if self.mode_var.get() == "human_ai":
+            self.board_flipped = self.human_side_var.get() == "black"
+        self.clear_selection()
+        self.draw_board()
+        self._start_engine_search()
+
+    def on_time_control_changed(self):
+        self.clock_flag = None
+        self.white_time = self._clock_seconds()
+        self.black_time = self.white_time
+        self._last_clock_tick = time.perf_counter()
+        self._update_clock_labels()
+        self.draw_board()
+
+    def on_time_preset_changed(self, value):
+        if value != "Custom":
+            minutes, increment = value.split("+", 1)
+            self.time_minutes_var.set(int(minutes))
+            self.increment_var.set(int(increment))
+        self.on_time_control_changed()
+
+    def toggle_board_flip(self):
+        self.board_flipped = not self.board_flipped
+        self.clear_selection()
+        self.draw_board()
+
+    def new_game(self):
+        self.board = Board()
+        self.mg = MoveGenerator(self.board)
+        self._node_by_id = {}
+        self.root_node = GameNode(self._capture())
+        self.current_node = self.root_node
+        self.clear_selection()
+        self.best_move = None
+        self.engine_thinking = False
+        self.clock_flag = None
+        self.white_time = self._clock_seconds()
+        self.black_time = self.white_time
+        self._last_clock_tick = time.perf_counter()
+        self.board_flipped = (
+            self.mode_var.get() == "human_ai"
+            and self.human_side_var.get() == "black"
+        )
+        self._search_generation += 1
+        self.draw_eval_bar(0)
+        self._update_clock_labels()
+        self.update_history_panel()
+        self.draw_board()
+        self._start_engine_search()
 
     # --- board snapshots --------------------------------------------------
 
@@ -388,6 +650,16 @@ class ChessGUI:
     def square_color(self, row, col):
         return LIGHT_SQUARE if (row + col) % 2 == 0 else DARK_SQUARE
 
+    def _display_to_board_square(self, display_row, display_col):
+        if self.board_flipped:
+            return 7 - display_row, 7 - display_col
+        return display_row, display_col
+
+    def _board_to_display_square(self, row, col):
+        if self.board_flipped:
+            return 7 - row, 7 - col
+        return row, col
+
     def get_check_highlights(self):
         highlights = set()
         for is_white in (True, False):
@@ -435,11 +707,17 @@ class ChessGUI:
         self.canvas.delete("all")
         check_highlights = self.get_check_highlights()
         game_status = self.mg.get_game_status()
-        self.status_var.set(game_status["message"])
+        if self.clock_flag:
+            self.status_var.set(self.clock_flag)
+        elif self.engine_thinking and self._is_engine_turn():
+            self.status_var.set(f"{game_status['message']}  Engine thinking...")
+        else:
+            self.status_var.set(game_status["message"])
 
-        for row in range(8):
-            for col in range(8):
-                x1, y1 = col * SQUARE_SIZE, row * SQUARE_SIZE
+        for display_row in range(8):
+            for display_col in range(8):
+                row, col = self._display_to_board_square(display_row, display_col)
+                x1, y1 = display_col * SQUARE_SIZE, display_row * SQUARE_SIZE
                 x2, y2 = x1 + SQUARE_SIZE, y1 + SQUARE_SIZE
 
                 self.canvas.create_rectangle(
@@ -470,8 +748,8 @@ class ChessGUI:
             self._draw_arrow(self.best_move[0], self.best_move[1])
 
     def _draw_arrow(self, start, end):
-        sr, sc = start
-        er, ec = end
+        sr, sc = self._board_to_display_square(*start)
+        er, ec = self._board_to_display_square(*end)
         half = SQUARE_SIZE // 2
         self.canvas.create_rectangle(
             sc * SQUARE_SIZE, sr * SQUARE_SIZE,
@@ -509,7 +787,7 @@ class ChessGUI:
         self._search_generation += 1
         generation = self._search_generation
         game_status = self.mg.get_game_status()
-        if game_status["is_over"]:
+        if game_status["is_over"] or self.clock_flag:
             self.best_move = None
             self.draw_eval_bar(self.mg.evaluate_position())
             self.draw_board()
@@ -518,23 +796,38 @@ class ChessGUI:
         self.score_var.set("...")
         snapshot = self._capture()
         is_white = self.board.turn == "white"
+        engine_turn = self._is_engine_turn()
+        self.engine_thinking = engine_turn
+        max_time = self._engine_movetime() if engine_turn else None
         threading.Thread(
             target=self._engine_thread,
-            args=(snapshot, is_white, generation),
+            args=(snapshot, is_white, generation, self._search_depth(), max_time),
             daemon=True,
         ).start()
 
-    def _engine_thread(self, snapshot, is_white, generation):
+    def _engine_thread(self, snapshot, is_white, generation, depth, max_time):
         mg = MoveGenerator(_board_from_snapshot(snapshot))
-        best_move, score = mg.find_best_move(SEARCH_DEPTH, is_white)
+        mg.in_opening = self.mg.in_opening
+        best_move, score = mg.find_best_move(depth, is_white, max_time=max_time)
         self.root.after(0, lambda: self._on_engine_done(best_move, score, generation))
 
     def _on_engine_done(self, best_move, score, generation):
         if generation != self._search_generation:
             return
+        self.engine_thinking = False
         self.best_move = best_move
         self.draw_eval_bar(score)
         self.draw_board()
+        if best_move and self._is_engine_turn() and not self.clock_flag:
+            self.root.after(100, lambda: self._play_engine_move(best_move, generation))
+
+    def _play_engine_move(self, move, generation):
+        if generation != self._search_generation:
+            return
+        if not self._is_engine_turn() or self.clock_flag or self.mg.get_game_status()["is_over"]:
+            return
+        promotion_choice = move[2] if len(move) > 2 else None
+        self._play_move(move[0], move[1], promotion_choice, from_engine=True)
 
     # --- click handler ----------------------------------------------------
 
@@ -543,15 +836,37 @@ class ChessGUI:
         self.legal_moves = self.mg.get_legal_moves(row, col)
         self.alert_king_square = None
 
+    def _play_move(self, start, end, promotion_choice=None, from_engine=False):
+        mover = self.board.turn
+        self._settle_clock()
+        san = move_to_san(self.board, self.mg, start, end, promotion_choice)
+        self.board.move_piece(start, end, promotion_choice)
+        if self._clock_enabled():
+            increment = self._increment_seconds()
+            if mover == "white":
+                self.white_time += increment
+            else:
+                self.black_time += increment
+        self._update_clock_labels()
+        self.clear_selection()
+        self.record_move(start, end, san, promotion_choice)
+        self.best_move = None
+        self.mg.in_opening = False
+        self.draw_board()
+        self._start_engine_search()
+
     def on_click(self, event):
         # No is_latest_position guard — moves from any node create a new branch
-        if self.mg.get_game_status()["is_over"]:
+        if self.mg.get_game_status()["is_over"] or self.clock_flag:
+            return
+        if self.engine_thinking or self._is_engine_turn():
             return
 
-        row = event.y // SQUARE_SIZE
-        col = event.x // SQUARE_SIZE
-        if not (0 <= row < 8 and 0 <= col < 8):
+        display_row = event.y // SQUARE_SIZE
+        display_col = event.x // SQUARE_SIZE
+        if not (0 <= display_row < 8 and 0 <= display_col < 8):
             return
+        row, col = self._display_to_board_square(display_row, display_col)
 
         piece = self.board.get_piece(row, col)
 
@@ -575,14 +890,7 @@ class ChessGUI:
                     self.draw_board()
                     return
 
-            # Compute SAN before the move mutates the board
-            san = move_to_san(self.board, self.mg, start, end, promotion_choice)
-            self.board.move_piece(start, end, promotion_choice)
-            self.clear_selection()
-            self.record_move(start, end, san, promotion_choice)
-            self.best_move = None
-            self.draw_board()
-            self._start_engine_search()
+            self._play_move(start, end, promotion_choice)
             return
 
         if self.is_current_turn_piece(piece):
