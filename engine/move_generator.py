@@ -1219,8 +1219,12 @@ class MoveGenerator:
 
         white_bishops = 0
         black_bishops = 0
+        white_rook_cols = []
+        black_rook_cols = []
         wpf = {}   # col -> [rows] of white pawns on that file
         bpf = {}   # col -> [rows] of black pawns on that file
+        wpm = [0] * 8
+        bpm = [0] * 8
         wnpm = 0   # white non-pawn material in pawn units
         bnpm = 0
 
@@ -1238,16 +1242,20 @@ class MoveGenerator:
                     bnpm += 3
                 elif piece == 'P':
                     wpf.setdefault(col, []).append(row)
+                    wpm[col] |= 1 << row
                 elif piece == 'p':
                     bpf.setdefault(col, []).append(row)
+                    bpm[col] |= 1 << row
                 elif piece == 'N':
                     wnpm += 3
                 elif piece == 'n':
                     bnpm += 3
                 elif piece == 'R':
                     wnpm += 5
+                    white_rook_cols.append(col)
                 elif piece == 'r':
                     bnpm += 5
+                    black_rook_cols.append(col)
                 elif piece == 'Q':
                     wnpm += 9
                 elif piece == 'q':
@@ -1260,15 +1268,14 @@ class MoveGenerator:
             score -= self._BISHOP_PAIR_BONUS
 
         score += self._evaluate_pawn_structure(wpf, bpf)
-        score += self._evaluate_passed_pawns(wpf, bpf)
-        score += self._evaluate_rooks(wpf, bpf)
+        score += self._evaluate_passed_pawns(wpf, bpf, wpm, bpm)
+        score += self._evaluate_rooks(wpf, bpf, white_rook_cols, black_rook_cols)
 
         phase = self._game_phase(wnpm, bnpm)
-        score += self._evaluate_mobility()
+        score += self._evaluate_activity(phase)
         score += self._evaluate_endgame_king_activity(phase)
         if phase < 0.95:
             score += self._evaluate_king_safety(wpf, bpf, phase)
-            score += self._evaluate_king_pressure(phase)
 
         return score
 
@@ -1309,7 +1316,7 @@ class MoveGenerator:
 
         return score
 
-    def _evaluate_passed_pawns(self, wpf, bpf):
+    def _evaluate_passed_pawns(self, wpf, bpf, wpm, bpm):
         """
         Bonus for pawns with no enemy pawn blocking or guarding ahead on same/adjacent files.
         White pawns advance toward row 0; black toward row 7.
@@ -1322,78 +1329,87 @@ class MoveGenerator:
 
         for col, rows in wpf.items():
             for row in rows:
-                passed = True
-                for r in range(row - 1, -1, -1):
-                    for dc in (-1, 0, 1):
-                        c2 = col + dc
-                        if 0 <= c2 < 8 and c2 in bpf and r in bpf[c2]:
-                            passed = False
-                            break
-                    if not passed:
+                ahead_mask = (1 << row) - 1
+                blocked = False
+                for c2 in range(max(0, col - 1), min(7, col + 1) + 1):
+                    if bpm[c2] & ahead_mask:
+                        blocked = True
                         break
-                if passed:
+                if not blocked:
                     score += bonus[7 - row]
 
         for col, rows in bpf.items():
             for row in rows:
-                passed = True
-                for r in range(row + 1, 8):
-                    for dc in (-1, 0, 1):
-                        c2 = col + dc
-                        if 0 <= c2 < 8 and c2 in wpf and r in wpf[c2]:
-                            passed = False
-                            break
-                    if not passed:
+                ahead_mask = ~((1 << (row + 1)) - 1)
+                blocked = False
+                for c2 in range(max(0, col - 1), min(7, col + 1) + 1):
+                    if wpm[c2] & ahead_mask:
+                        blocked = True
                         break
-                if passed:
+                if not blocked:
                     score -= bonus[row]
 
         return score
 
-    def _evaluate_rooks(self, wpf, bpf):
+    def _evaluate_rooks(self, wpf, bpf, white_rook_cols, black_rook_cols):
         """
         Bonus for rooks on open or semi-open files.
         Complements the rook PST (which rewards rank but not file openness).
         Returns White-perspective score.
         """
         score = 0.0
-        board = self.board.board
         ob = self._ROOK_OPEN_FILE
         sb = self._ROOK_SEMI_OPEN
 
-        for row in range(8):
-            for col in range(8):
-                piece = board[row][col]
-                if piece == 'R':
-                    if col not in wpf and col not in bpf:
-                        score += ob
-                    elif col not in wpf:
-                        score += sb
-                elif piece == 'r':
-                    if col not in wpf and col not in bpf:
-                        score -= ob
-                    elif col not in bpf:
-                        score -= sb
+        for col in white_rook_cols:
+            if col not in wpf and col not in bpf:
+                score += ob
+            elif col not in wpf:
+                score += sb
+
+        for col in black_rook_cols:
+            if col not in wpf and col not in bpf:
+                score -= ob
+            elif col not in bpf:
+                score -= sb
 
         return score
 
-    def _evaluate_mobility(self):
+    def _evaluate_activity(self, phase):
         score = 0.0
         board = self.board.board
-        weights = self._MOBILITY_WEIGHTS
+        mobility_weights = self._MOBILITY_WEIGHTS
+        pressure_weights = self._KING_PRESSURE_WEIGHTS
+        mg = 1.0 - phase if phase < 0.95 else 0.0
+        white_king = self.board.white_king_pos
+        black_king = self.board.black_king_pos
         previous_turn = self.board.turn
+
+        def attacked_zone_count(moves, king_pos):
+            kr, kc = king_pos
+            return sum(1 for r, c in moves if abs(r - kr) <= 1 and abs(c - kc) <= 1)
 
         try:
             for row in range(8):
                 for col in range(8):
                     piece = board[row][col]
                     piece_type = piece.lower()
-                    if piece_type not in weights:
+                    mobility_weight = mobility_weights.get(piece_type)
+                    pressure_weight = pressure_weights.get(piece_type)
+                    if mobility_weight is None:
                         continue
+
+                    is_white_piece = piece.isupper()
                     self.board.turn = "white" if piece.isupper() else "black"
-                    mobility = len(self.get_piece_moves(row, col, ignore_turn=True))
-                    bonus = weights[piece_type] * mobility
-                    score += bonus if piece.isupper() else -bonus
+                    moves = self.get_piece_moves(row, col, ignore_turn=True)
+
+                    bonus = mobility_weight * len(moves)
+                    score += bonus if is_white_piece else -bonus
+
+                    if mg > 0.0 and pressure_weight is not None:
+                        target_king = black_king if is_white_piece else white_king
+                        pressure = attacked_zone_count(moves, target_king) * pressure_weight * mg
+                        score += pressure if is_white_piece else -pressure
         finally:
             self.board.turn = previous_turn
 
@@ -1411,37 +1427,6 @@ class MoveGenerator:
             centrality(self.board.white_king_pos)
             - centrality(self.board.black_king_pos)
         ) * self._ENDGAME_KING_ACTIVITY * phase
-
-    def _evaluate_king_pressure(self, phase):
-        mg = 1.0 - phase
-        if mg <= 0:
-            return 0.0
-
-        score = 0.0
-        white_king = self.board.white_king_pos
-        black_king = self.board.black_king_pos
-
-        def near_king(square, king_pos):
-            return abs(square[0] - king_pos[0]) <= 1 and abs(square[1] - king_pos[1]) <= 1
-
-        previous_turn = self.board.turn
-        try:
-            for row in range(8):
-                for col in range(8):
-                    piece = self.board.board[row][col]
-                    piece_type = piece.lower()
-                    if piece_type not in self._KING_PRESSURE_WEIGHTS:
-                        continue
-                    self.board.turn = "white" if piece.isupper() else "black"
-                    target_king = black_king if piece.isupper() else white_king
-                    attacks = self.get_piece_moves(row, col, ignore_turn=True)
-                    attacked_zone = sum(1 for square in attacks if near_king(square, target_king))
-                    pressure = attacked_zone * self._KING_PRESSURE_WEIGHTS[piece_type] * mg
-                    score += pressure if piece.isupper() else -pressure
-        finally:
-            self.board.turn = previous_turn
-
-        return score
 
     def _evaluate_king_safety(self, wpf, bpf, phase):
         """
