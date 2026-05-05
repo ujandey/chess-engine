@@ -61,9 +61,7 @@ def apply_uci_move(board, mg, move_text):
             print(f"info string illegal move ignored: {move_text}", flush=True)
             return False
 
-    board.make_move(start, end, promotion)
-    board.turn = "black" if board.turn == "white" else "white"
-    board.record_current_position()
+    board.push(start, end, promotion)
     return True
 
 

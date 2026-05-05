@@ -97,7 +97,7 @@ class GameStateTests(unittest.TestCase):
 
         self.assertEqual(mg.negamax(depth=5, is_white_turn=False, ply=2), -998)
 
-    def test_search_counts_repetitions_on_current_line(self):
+    def test_search_uses_board_repetition_counts_for_current_line(self):
         board = Board()
         board.board = [
             [".", ".", ".", ".", "k", ".", ".", "."],
@@ -112,12 +112,11 @@ class GameStateTests(unittest.TestCase):
         board.turn = "black"
         board.refresh_zobrist_hash()
         key = board.zobrist_hash
-        board.position_counts = {key: 1}
+        board.position_counts = {key: 3}
         mg = MoveGenerator(board)
-        mg._search_position_counts = {key: 1}
 
         self.assertEqual(mg.negamax(depth=1, is_white_turn=False), 0)
-        self.assertEqual(mg._search_position_counts, {key: 1})
+        self.assertEqual(board.position_counts, {key: 3})
 
     def test_evaluation_is_white_perspective_for_material(self):
         board = Board()
@@ -298,6 +297,28 @@ class GameStateTests(unittest.TestCase):
 
         board.undo_move((7, 7), (7, 6), move_state)
         self.assertEqual(board.halfmove_clock, 12)
+
+    def test_push_and_pop_own_turn_repetition_halfmove_and_hash(self):
+        board = Board()
+        start_hash = board.zobrist_hash
+        start_counts = board.position_counts.copy()
+
+        move_state = board.push((6, 4), (4, 4))
+
+        self.assertEqual(board.turn, "black")
+        self.assertEqual(board.halfmove_clock, 0)
+        self.assertEqual(board.get_piece(4, 4), "P")
+        self.assertEqual(board.position_counts[board.zobrist_hash], 1)
+        self.assertNotEqual(board.zobrist_hash, start_hash)
+
+        board.pop(move_state)
+
+        self.assertEqual(board.turn, "white")
+        self.assertEqual(board.halfmove_clock, 0)
+        self.assertEqual(board.get_piece(6, 4), "P")
+        self.assertEqual(board.get_piece(4, 4), ".")
+        self.assertEqual(board.zobrist_hash, start_hash)
+        self.assertEqual(board.position_counts, start_counts)
 
 
 if __name__ == "__main__":

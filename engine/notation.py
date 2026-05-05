@@ -18,7 +18,7 @@ def move_to_san(board, mg, start, end, promotion_choice=None):
     piece_type = piece.lower()
 
     def check_suffix():
-        move_state = board.make_move(start, end, promotion_choice)
+        move_state = board.push(start, end, promotion_choice)
         opponent_is_white = not piece.isupper()
         try:
             if mg.is_checkmate(opponent_is_white):
@@ -27,7 +27,7 @@ def move_to_san(board, mg, start, end, promotion_choice=None):
                 return "+"
             return ""
         finally:
-            board.undo_move(start, end, move_state)
+            board.pop(move_state)
 
     # Castling
     if piece_type == "k" and abs(ec - sc) == 2:

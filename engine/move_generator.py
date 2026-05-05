@@ -123,7 +123,6 @@ class MoveGenerator:
         self.last_completed_depth = 0
         self.last_search_time = 0.0
         self.seldepth = 0
-        self._search_position_counts = {}
         self.tt_max_entries = 64 * 1024 * 1024 // 300  # ~224K entries (64 MB default)
         if MoveGenerator.EVAL_TABLE is None:
             MoveGenerator.EVAL_TABLE = self._build_eval_table()
@@ -563,9 +562,9 @@ class MoveGenerator:
         nodes = 0
         try:
             for start, end, promo in self.generate_all_legal_moves(is_white):
-                move_state = self.board.make_move(start, end, promo)
+                move_state = self.board.push(start, end, promo)
                 nodes += self.perft(depth - 1, not is_white)
-                self.board.undo_move(start, end, move_state)
+                self.board.pop(move_state)
         finally:
             self.board.turn = previous_turn
 
@@ -580,9 +579,9 @@ class MoveGenerator:
         results = []
         try:
             for start, end, promo in self.generate_all_legal_moves(is_white):
-                move_state = self.board.make_move(start, end, promo)
+                move_state = self.board.push(start, end, promo)
                 nodes = self.perft(depth - 1, not is_white)
-                self.board.undo_move(start, end, move_state)
+                self.board.pop(move_state)
                 results.append(((start, end, promo), nodes))
         finally:
             self.board.turn = previous_turn
@@ -690,8 +689,8 @@ class MoveGenerator:
             if first_move is not None and remaining > 0:
                 start, end, promo = first_move
                 self.board.turn = "white" if cur_white else "black"
-                state = self.board.make_move(start, end, promo)
-                states.append((start, end, state))
+                state = self.board.push(start, end, promo)
+                states.append(state)
                 pv.append(first_move)
                 cur_white = not cur_white
                 remaining -= 1
@@ -707,15 +706,15 @@ class MoveGenerator:
                 move = entry[3]
                 start, end, promo = move
                 self.board.turn = "white" if cur_white else "black"
-                state = self.board.make_move(start, end, promo)
-                states.append((start, end, state))
+                state = self.board.push(start, end, promo)
+                states.append(state)
                 pv.append(move)
                 cur_white = not cur_white
         except (IndexError, KeyError, TypeError, ValueError):
             pass
         finally:
-            for s, e, st in reversed(states):
-                self.board.undo_move(s, e, st)
+            for st in reversed(states):
+                self.board.pop(st)
             self.board.turn = orig_turn
         return pv
 
@@ -794,12 +793,12 @@ class MoveGenerator:
                 if not self.is_promotion_move(start, end) and self.static_exchange_eval(start, end) < -0.20:
                     continue
 
-                move_state = self.board.make_move(start, end, promo)
+                move_state = self.board.push(start, end, promo)
                 if self.is_in_check(is_white_turn):
-                    self.board.undo_move(start, end, move_state)
+                    self.board.pop(move_state)
                     continue
                 score = -self.quiescence(-beta, -alpha, not is_white_turn, ply + 1)
-                self.board.undo_move(start, end, move_state)
+                self.board.pop(move_state)
                 if score > best:
                     best = score
                 if best > alpha:
@@ -826,8 +825,6 @@ class MoveGenerator:
 
         previous_turn = self.board.turn
         self.board.turn = "white" if is_white_turn else "black"
-        search_key = None
-        counted_search_key = False
 
         try:
             in_check = self.is_in_check(is_white_turn)
@@ -837,16 +834,9 @@ class MoveGenerator:
             alpha_orig = alpha
             beta_orig = beta
             tt_key = self.board.zobrist_hash
-            search_key = tt_key
 
-            repetition_count = (
-                self.board.position_counts.get(tt_key, 0)
-                + self._search_position_counts.get(tt_key, 0)
-            )
-            if repetition_count + 1 >= 3:
+            if self.board.position_counts.get(tt_key, 0) >= 3:
                 return 0
-            self._search_position_counts[tt_key] = self._search_position_counts.get(tt_key, 0) + 1
-            counted_search_key = True
 
             tt_entry = self.transposition_table.get(tt_key)
             tt_move = tt_entry[3] if tt_entry is not None and len(tt_entry) > 3 else None
@@ -898,7 +888,7 @@ class MoveGenerator:
                 is_capture = target != "." or (mover.lower() == "p" and start[1] != end[1])
                 is_promotion = self.is_promotion_move(start, end)
 
-                move_state = self.board.make_move(start, end, promo)
+                move_state = self.board.push(start, end, promo)
                 gives_check = False
                 if move_index > 5 and depth >= 3 and not is_capture and not is_promotion:
                     gives_check = self.is_in_check(not is_white_turn)
@@ -919,7 +909,7 @@ class MoveGenerator:
                 if reduced and score > alpha:
                     score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha, ply=ply + 1)
 
-                self.board.undo_move(start, end, move_state)
+                self.board.pop(move_state)
                 if score > best_score:
                     best_score = score
                     best_move_local = (start, end, promo)
@@ -941,12 +931,6 @@ class MoveGenerator:
                 if len(self.transposition_table) < self.tt_max_entries:
                     self.transposition_table[tt_key] = (depth, best_score, flag, best_move_local)
         finally:
-            if counted_search_key and search_key is not None:
-                count = self._search_position_counts.get(search_key, 0)
-                if count <= 1:
-                    self._search_position_counts.pop(search_key, None)
-                else:
-                    self._search_position_counts[search_key] = count - 1
             self.board.turn = previous_turn
 
         return best_score
@@ -983,7 +967,6 @@ class MoveGenerator:
         self.last_completed_depth = 0
         self.search_deadline = (t0 + max_time) if max_time is not None else None
         self.stop_search = False
-        self._search_position_counts = {}
 
         try:
             for current_depth in range(1, depth + 1):
@@ -999,14 +982,14 @@ class MoveGenerator:
 
                 for move_index, (start, end, promo) in enumerate(moves):
                     self.board.turn = "white" if is_white_turn else "black"
-                    move_state = self.board.make_move(start, end, promo)
+                    move_state = self.board.push(start, end, promo)
                     if move_index == 0:
                         score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha, ply=1)
                     else:
                         score = -self.negamax(current_depth - 1, not is_white_turn, -alpha - 1, -alpha, ply=1)
                         if score > alpha and score < beta:
                             score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha, ply=1)
-                    self.board.undo_move(start, end, move_state)
+                    self.board.pop(move_state)
 
                     if score > iter_best_score:
                         iter_best_score = score

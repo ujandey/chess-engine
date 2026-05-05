@@ -248,10 +248,37 @@ class Board:
 
         return normalized_choice if piece.isupper() else normalized_choice.lower()
 
-    def move_piece(self, start, end, promotion_choice=None):
-        self.make_move(start, end, promotion_choice)
+    def _switch_turn(self):
         self.turn = "black" if self.turn == "white" else "white"
-        self.record_current_position()
+
+    def move_piece(self, start, end, promotion_choice=None):
+        self.push(start, end, promotion_choice)
+
+    def push(self, start, end, promotion_choice=None):
+        previous_turn = self.turn
+        move_state = self.make_move(start, end, promotion_choice)
+        self._switch_turn()
+        position_key = self.get_position_key()
+        self.position_counts[position_key] = self.position_counts.get(position_key, 0) + 1
+        move_state.update({
+            "start": start,
+            "end": end,
+            "promotion_choice": promotion_choice,
+            "previous_turn": previous_turn,
+            "pushed_position_key": position_key,
+        })
+        return move_state
+
+    def pop(self, move_state):
+        position_key = move_state["pushed_position_key"]
+        count = self.position_counts.get(position_key, 0)
+        if count <= 1:
+            self.position_counts.pop(position_key, None)
+        else:
+            self.position_counts[position_key] = count - 1
+
+        self.turn = move_state["previous_turn"]
+        self.undo_move(move_state["start"], move_state["end"], move_state)
 
     def update_castling_rights_for_rook(self, piece, row, col):
         if piece == "R":
