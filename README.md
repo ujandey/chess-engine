@@ -159,6 +159,24 @@ Search optimizations:
 
 `MoveGenerator.perft()` and `MoveGenerator.perft_divide()` are available for move-generation validation. The `benchmark.py` script runs fixed-position perft and search benchmarks.
 
+## Move Representation
+
+Moves are currently represented as `(start, end, promotion)` tuples, where `start`
+and `end` are `(row, col)` board coordinates and `promotion` is one of
+`"Q"`, `"R"`, `"B"`, `"N"`, or `None`.
+
+This keeps the engine simple while the public surface is still small, but the
+move tuple is now used across move generation, search, UCI, notation, GUI
+history, ordering heuristics, and tests. If the engine grows further, consider
+introducing either:
+
+- A lightweight `Move` object/dataclass for readability and safer call sites.
+- An encoded move integer for faster search, compact transposition-table
+  storage, and cheaper move ordering metadata.
+
+A future migration should keep conversion helpers at the edges (`UCI`, `SAN`,
+GUI) and avoid mixing multiple move representations deep in search.
+
 ## Pruning Safety Layer
 
 The search deliberately avoids the most aggressive versions of pruning:
@@ -203,7 +221,7 @@ Recent audit and cleanup:
 
 ## Tests
 
-Current suite: 51 tests.
+Current suite: 83 tests.
 
 Coverage areas:
 
@@ -225,6 +243,4 @@ py -m pytest
 
 ## Current Limitations
 
-- The GUI shows the engine's best move but does not automatically play engine moves.
-- No clocks or time controls.
 - Tkinter Unicode piece rendering depends on local font support.

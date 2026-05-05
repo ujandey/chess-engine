@@ -17,9 +17,22 @@ def move_to_san(board, mg, start, end, promotion_choice=None):
     piece = board.get_piece(sr, sc)
     piece_type = piece.lower()
 
+    def check_suffix():
+        move_state = board.make_move(start, end, promotion_choice)
+        opponent_is_white = not piece.isupper()
+        try:
+            if mg.is_checkmate(opponent_is_white):
+                return "#"
+            if mg.is_in_check(opponent_is_white):
+                return "+"
+            return ""
+        finally:
+            board.undo_move(start, end, move_state)
+
     # Castling
     if piece_type == "k" and abs(ec - sc) == 2:
-        return "O-O" if ec > sc else "O-O-O"
+        san = "O-O" if ec > sc else "O-O-O"
+        return san + check_suffix()
 
     captured = board.get_piece(er, ec)
     is_ep = (
@@ -72,12 +85,6 @@ def move_to_san(board, mg, start, end, promotion_choice=None):
         san += "=Q"
 
     # Check / checkmate suffix — simulate then undo
-    move_state = board.make_move(start, end, promotion_choice)
-    opponent_is_white = not piece.isupper()
-    if mg.is_checkmate(opponent_is_white):
-        san += "#"
-    elif mg.is_in_check(opponent_is_white):
-        san += "+"
-    board.undo_move(start, end, move_state)
+    san += check_suffix()
 
     return san

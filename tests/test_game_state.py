@@ -79,6 +79,46 @@ class GameStateTests(unittest.TestCase):
 
         self.assertEqual(mg.evaluate_position(depth=2), -998)
 
+    def test_search_mate_score_uses_ply_distance(self):
+        board = Board()
+        board.board = [
+            [".", ".", ".", ".", ".", ".", ".", "k"],
+            [".", ".", ".", ".", ".", ".", "Q", "."],
+            [".", ".", ".", ".", ".", "K", ".", "."],
+            [".", ".", ".", ".", ".", ".", ".", "."],
+            [".", ".", ".", ".", ".", ".", ".", "."],
+            [".", ".", ".", ".", ".", ".", ".", "."],
+            [".", ".", ".", ".", ".", ".", ".", "."],
+            [".", ".", ".", ".", ".", ".", ".", "."],
+        ]
+        board.turn = "black"
+        board.refresh_zobrist_hash()
+        mg = MoveGenerator(board)
+
+        self.assertEqual(mg.negamax(depth=5, is_white_turn=False, ply=2), -998)
+
+    def test_search_counts_repetitions_on_current_line(self):
+        board = Board()
+        board.board = [
+            [".", ".", ".", ".", "k", ".", ".", "."],
+            [".", ".", ".", ".", ".", ".", ".", "."],
+            [".", ".", ".", ".", ".", ".", ".", "."],
+            [".", ".", ".", ".", ".", ".", ".", "."],
+            [".", ".", ".", ".", ".", ".", ".", "."],
+            [".", ".", ".", ".", ".", "N", ".", "."],
+            [".", ".", ".", ".", "P", ".", ".", "."],
+            [".", ".", ".", ".", "K", ".", ".", "."],
+        ]
+        board.turn = "black"
+        board.refresh_zobrist_hash()
+        key = board.zobrist_hash
+        board.position_counts = {key: 1}
+        mg = MoveGenerator(board)
+        mg._search_position_counts = {key: 1}
+
+        self.assertEqual(mg.negamax(depth=1, is_white_turn=False), 0)
+        self.assertEqual(mg._search_position_counts, {key: 1})
+
     def test_evaluation_is_white_perspective_for_material(self):
         board = Board()
         board.board = [

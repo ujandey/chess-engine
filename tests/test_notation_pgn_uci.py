@@ -61,6 +61,29 @@ class SanTests(unittest.TestCase):
         self.assertEqual(move_to_san(board, mg, (7, 4), (7, 6)), "O-O")
         self.assertEqual(move_to_san(board, mg, (7, 4), (7, 2)), "O-O-O")
 
+    def test_castling_san_includes_check_suffix(self):
+        board = make_board(
+            [
+                [".", ".", ".", ".", ".", "k", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", "K", ".", ".", "R"],
+            ],
+            castling_rights={
+                "white_kingside": True,
+                "white_queenside": False,
+                "black_kingside": False,
+                "black_queenside": False,
+            },
+        )
+        mg = MoveGenerator(board)
+
+        self.assertEqual(move_to_san(board, mg, (7, 4), (7, 6)), "O-O+")
+
     def test_capture_promotion_and_checkmate_san(self):
         board = make_board(
             [
@@ -202,6 +225,41 @@ class UciParsingTests(unittest.TestCase):
         # pawn must still be on a7; move was rejected
         self.assertEqual(board.get_piece(1, 0), "P")
         self.assertEqual(board.turn, "white")
+
+    def test_apply_uci_move_rejects_bad_coordinates(self):
+        board = Board()
+        mg = MoveGenerator(board)
+
+        self.assertFalse(apply_uci_move(board, mg, "e2e9"))
+        self.assertFalse(apply_uci_move(board, mg, "e2"))
+        self.assertEqual(board.get_piece(6, 4), "P")
+        self.assertEqual(board.turn, "white")
+
+    def test_apply_uci_move_requires_exact_promotion_legality(self):
+        board = Board()
+        mg = MoveGenerator(board)
+
+        self.assertFalse(apply_uci_move(board, mg, "e2e4q"))
+        self.assertEqual(board.get_piece(6, 4), "P")
+        self.assertEqual(board.turn, "white")
+
+        promo_board = make_board(
+            [
+                [".", ".", ".", ".", "k", ".", ".", "."],
+                ["P", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", ".", ".", ".", "."],
+                [".", ".", ".", ".", "K", ".", ".", "."],
+            ]
+        )
+        promo_mg = MoveGenerator(promo_board)
+
+        self.assertFalse(apply_uci_move(promo_board, promo_mg, "a7a8"))
+        self.assertEqual(promo_board.get_piece(1, 0), "P")
+        self.assertEqual(promo_board.turn, "white")
 
 
 if __name__ == "__main__":

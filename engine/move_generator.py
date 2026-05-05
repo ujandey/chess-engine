@@ -123,6 +123,7 @@ class MoveGenerator:
         self.last_completed_depth = 0
         self.last_search_time = 0.0
         self.seldepth = 0
+        self._search_position_counts = {}
         self.tt_max_entries = 64 * 1024 * 1024 // 300  # ~224K entries (64 MB default)
         if MoveGenerator.EVAL_TABLE is None:
             MoveGenerator.EVAL_TABLE = self._build_eval_table()
@@ -825,6 +826,8 @@ class MoveGenerator:
 
         previous_turn = self.board.turn
         self.board.turn = "white" if is_white_turn else "black"
+        search_key = None
+        counted_search_key = False
 
         try:
             in_check = self.is_in_check(is_white_turn)
@@ -834,9 +837,16 @@ class MoveGenerator:
             alpha_orig = alpha
             beta_orig = beta
             tt_key = self.board.zobrist_hash
+            search_key = tt_key
 
-            if self.board.position_counts.get(tt_key, 0) >= 3:
+            repetition_count = (
+                self.board.position_counts.get(tt_key, 0)
+                + self._search_position_counts.get(tt_key, 0)
+            )
+            if repetition_count + 1 >= 3:
                 return 0
+            self._search_position_counts[tt_key] = self._search_position_counts.get(tt_key, 0) + 1
+            counted_search_key = True
 
             tt_entry = self.transposition_table.get(tt_key)
             tt_move = tt_entry[3] if tt_entry is not None and len(tt_entry) > 3 else None
@@ -875,7 +885,7 @@ class MoveGenerator:
             moves = self.generate_all_legal_moves(is_white_turn)
             if not moves:
                 if in_check:
-                    return -self.MATE_SCORE - depth
+                    return -self.MATE_SCORE + ply
                 return 0
 
             moves = self.order_moves(moves, is_white_turn, depth, tt_move)
@@ -931,6 +941,12 @@ class MoveGenerator:
                 if len(self.transposition_table) < self.tt_max_entries:
                     self.transposition_table[tt_key] = (depth, best_score, flag, best_move_local)
         finally:
+            if counted_search_key and search_key is not None:
+                count = self._search_position_counts.get(search_key, 0)
+                if count <= 1:
+                    self._search_position_counts.pop(search_key, None)
+                else:
+                    self._search_position_counts[search_key] = count - 1
             self.board.turn = previous_turn
 
         return best_score
@@ -967,6 +983,7 @@ class MoveGenerator:
         self.last_completed_depth = 0
         self.search_deadline = (t0 + max_time) if max_time is not None else None
         self.stop_search = False
+        self._search_position_counts = {}
 
         try:
             for current_depth in range(1, depth + 1):

@@ -25,6 +25,10 @@ def coord_to_square(text):
     return 8 - int(text[1]), ord(text[0]) - ord("a")
 
 
+def _is_coord(text):
+    return len(text) == 2 and text[0] in "abcdefgh" and text[1] in "12345678"
+
+
 def move_to_uci(move):
     if move is None:
         return "0000"
@@ -37,25 +41,29 @@ def move_to_uci(move):
 
 
 def apply_uci_move(board, mg, move_text):
+    if len(move_text) not in (4, 5) or not _is_coord(move_text[:2]) or not _is_coord(move_text[2:4]):
+        print(f"info string illegal move ignored: {move_text}", flush=True)
+        return False
+
     start = coord_to_square(move_text[:2])
     end = coord_to_square(move_text[2:4])
     promotion = move_text[4].upper() if len(move_text) > 4 else None
 
     if promotion is not None and promotion not in _VALID_PROMOS:
         print(f"info string illegal move ignored: {move_text}", flush=True)
-        return
+        return False
 
     if mg is not None:
         is_white = board.turn == "white"
         legal_moves = mg.generate_all_legal_moves(is_white)
-        legal_endpoints = {(s, e) for s, e, _ in legal_moves}
-        if (start, end) not in legal_endpoints:
+        if (start, end, promotion) not in legal_moves:
             print(f"info string illegal move ignored: {move_text}", flush=True)
-            return
+            return False
 
     board.make_move(start, end, promotion)
     board.turn = "black" if board.turn == "white" else "white"
     board.record_current_position()
+    return True
 
 
 def configure_position(board, mg, args):
