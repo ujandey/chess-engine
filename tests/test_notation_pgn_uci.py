@@ -1,9 +1,12 @@
+import threading
+import time
 import unittest
 
 from engine.board import Board
 from engine.move_generator import MoveGenerator
 from engine.notation import move_to_san
 from engine.uci import (
+    UciEngine,
     apply_uci_move,
     configure_position,
     coord_to_square,
@@ -260,6 +263,43 @@ class UciParsingTests(unittest.TestCase):
         self.assertFalse(apply_uci_move(promo_board, promo_mg, "a7a8"))
         self.assertEqual(promo_board.get_piece(1, 0), "P")
         self.assertEqual(promo_board.turn, "white")
+
+
+class UciProtocolTests(unittest.TestCase):
+    def test_go_runs_in_background_and_stop_finishes_bestmove(self):
+        class SlowSearch:
+            def __init__(self):
+                self.stop_search = False
+                self.last_completed_depth = 1
+                self.node_count = 1
+                self.seldepth = 1
+                self.transposition_table = {}
+                self.tt_max_entries = 1
+                self.started = threading.Event()
+
+            def find_best_move(self, *args, **kwargs):
+                self.started.set()
+                while not self.stop_search:
+                    time.sleep(0.001)
+                return ((6, 4), (4, 4), None), 0
+
+        output = []
+        engine = UciEngine(emit=output.append)
+        engine.mg = SlowSearch()
+
+        t0 = time.perf_counter()
+        self.assertTrue(engine.handle_line("go infinite"))
+        self.assertLess(time.perf_counter() - t0, 0.05)
+        self.assertTrue(engine.mg.started.wait(0.5))
+        self.assertTrue(engine.search_thread.is_alive())
+
+        self.assertTrue(engine.handle_line("isready"))
+        self.assertIn("readyok", output)
+
+        self.assertTrue(engine.handle_line("stop"))
+        engine.wait_for_search()
+
+        self.assertIn("bestmove e2e4", output)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import sys
+import threading
 import time
 
 from engine.board import Board
@@ -160,7 +161,10 @@ def _format_score(score_pawns):
     return f"cp {int(score_pawns * 100)}"
 
 
-def make_info_callback(mg, t0):
+def make_info_callback(mg, t0, emit=None):
+    if emit is None:
+        emit = lambda line: print(line, flush=True)
+
     def callback(depth, score, pv):
         elapsed_ms = max(1, int((time.perf_counter() - t0) * 1000))
         nps = int(mg.node_count / (elapsed_ms / 1000.0))
@@ -175,31 +179,83 @@ def make_info_callback(mg, t0):
                 f" nodes {mg.node_count} nps {nps} hashfull {hashfull} time {elapsed_ms}")
         if pv_str:
             line += f" pv {pv_str}"
-        print(line, flush=True)
+        emit(line)
     return callback
 
 
-def main():
-    board = Board()
-    mg = MoveGenerator(board)
+class UciEngine:
+    def __init__(self, emit=None):
+        self.board = Board()
+        self.mg = MoveGenerator(self.board)
+        self.search_thread = None
+        self._emit = emit or self._print
 
-    for raw_line in sys.stdin:
-        line = raw_line.strip()
+    @staticmethod
+    def _print(line):
+        print(line, flush=True)
+
+    def _search_is_active(self):
+        return self.search_thread is not None and self.search_thread.is_alive()
+
+    def stop_search(self):
+        if self._search_is_active():
+            self.mg.stop_search = True
+
+    def wait_for_search(self):
+        if self.search_thread is not None:
+            self.search_thread.join()
+            self.search_thread = None
+
+    def stop_and_wait(self):
+        self.stop_search()
+        self.wait_for_search()
+
+    def _start_search(self, args):
+        self.stop_and_wait()
+
+        is_white = self.board.turn == "white"
+        depth, movetime = parse_go(args, is_white)
+        t0 = time.perf_counter()
+        callback = make_info_callback(self.mg, t0, self._emit)
+
+        def run_search():
+            best_move, score = self.mg.find_best_move(
+                depth, is_white, max_time=movetime, verbose=False,
+                on_depth_complete=callback,
+            )
+            # Opening book or sub-depth-1 timeout: emit a minimal info line
+            if self.mg.last_completed_depth == 0 and best_move is not None:
+                elapsed_ms = max(1, int((time.perf_counter() - t0) * 1000))
+                pv_str = move_to_uci(best_move)
+                # score from find_best_move is white-perspective; flip to side-to-move perspective
+                mover_score = score if is_white else -score
+                self._emit(
+                    f"info depth 1 seldepth 1 score {_format_score(mover_score)}"
+                    f" nodes {self.mg.node_count} nps 0 time {elapsed_ms} pv {pv_str}"
+                )
+            self._emit(f"bestmove {move_to_uci(best_move)}")
+
+        self.search_thread = threading.Thread(target=run_search, daemon=True)
+        self.search_thread.start()
+
+    def handle_line(self, line):
+        line = line.strip()
         if not line:
-            continue
+            return True
 
         parts = line.split()
         command = parts[0]
         args = parts[1:]
 
         if command == "uci":
-            print("id name Suar")
-            print("id author Ujan Dey")
+            self._emit("id name Suar")
+            self._emit("id author Ujan Dey")
             for name, (opt_type, default, mn, mx) in _OPTIONS.items():
-                print(f"option name {name} type {opt_type} default {default} min {mn} max {mx}")
-            print("uciok")
+                self._emit(f"option name {name} type {opt_type} default {default} min {mn} max {mx}")
+            self._emit("uciok")
 
         elif command == "setoption":
+            self.stop_and_wait()
             # setoption name <Name> value <val>
             if "name" in args:
                 name_idx = args.index("name")
@@ -213,7 +269,7 @@ def main():
 
                 if opt_name == "Hash" and val_str is not None:
                     try:
-                        mg.set_hash_size(int(val_str))
+                        self.mg.set_hash_size(int(val_str))
                     except ValueError:
                         pass
                 elif opt_name == "Move Overhead" and val_str is not None:
@@ -226,38 +282,35 @@ def main():
                 # Threads: always 1, silently accepted
 
         elif command == "isready":
-            print("readyok")
+            self._emit("readyok")
 
         elif command == "ucinewgame":
-            board = Board()
-            mg = MoveGenerator(board)
+            self.stop_and_wait()
+            self.board = Board()
+            self.mg = MoveGenerator(self.board)
 
         elif command == "position":
-            configure_position(board, mg, args)
+            self.stop_and_wait()
+            configure_position(self.board, self.mg, args)
 
         elif command == "go":
-            is_white = board.turn == "white"
-            depth, movetime = parse_go(args, is_white)
-            t0 = time.perf_counter()
-            callback = make_info_callback(mg, t0)
-            best_move, score = mg.find_best_move(
-                depth, is_white, max_time=movetime, verbose=False,
-                on_depth_complete=callback,
-            )
-            # Opening book or sub-depth-1 timeout: emit a minimal info line
-            if mg.last_completed_depth == 0 and best_move is not None:
-                elapsed_ms = max(1, int((time.perf_counter() - t0) * 1000))
-                pv_str = move_to_uci(best_move)
-                # score from find_best_move is white-perspective; flip to side-to-move perspective
-                mover_score = score if is_white else -score
-                print(f"info depth 1 seldepth 1 score {_format_score(mover_score)}"
-                      f" nodes {mg.node_count} nps 0 time {elapsed_ms} pv {pv_str}", flush=True)
-            print(f"bestmove {move_to_uci(best_move)}", flush=True)
+            self._start_search(args)
 
         elif command == "stop":
-            mg.stop_search = True
+            self.stop_search()
 
         elif command == "quit":
+            self.stop_and_wait()
+            return False
+
+        return True
+
+
+def main():
+    engine = UciEngine()
+
+    for raw_line in sys.stdin:
+        if not engine.handle_line(raw_line):
             break
 
         sys.stdout.flush()
