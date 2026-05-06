@@ -418,15 +418,16 @@ class Board:
 
         self._remove_piece_position(self.board[er][ec], er, ec)
         self.board[sr][sc] = piece
-        self.board[er][ec] = captured
         self._add_piece_position(piece, sr, sc)
-        self._add_piece_position(captured, er, ec)
         if en_passant_capture is not None:
+            # En passant: destination was empty before the move, restore it to empty.
             (capture_row, capture_col), captured_piece = en_passant_capture
-            self._remove_piece_position(captured, er, ec)
             self.board[er][ec] = "."
             self.board[capture_row][capture_col] = captured_piece
             self._add_piece_position(captured_piece, capture_row, capture_col)
+        else:
+            self.board[er][ec] = captured
+            self._add_piece_position(captured, er, ec)
         self.castling_rights = move_state["previous_castling_rights"]
         self.en_passant_target = move_state["previous_en_passant_target"]
         self.halfmove_clock = move_state["previous_halfmove_clock"]
