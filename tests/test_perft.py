@@ -9,17 +9,23 @@ class PerftTests(unittest.TestCase):
         (
             "startpos",
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-            {1: 20, 2: 400, 3: 8902},
+            {1: 20, 2: 400, 3: 8902, 4: 197281},
         ),
         (
             "kiwipete",
-            "r3k2r/p1ppqpb1/bn2pnp1/2pPN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-            {1: 48, 2: 1991},
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            {1: 48, 2: 2039, 3: 97862},
         ),
         (
             "endgame_ep",
             "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
-            {1: 14, 2: 191, 3: 2812},
+            {1: 14, 2: 191, 3: 2812, 4: 43238},
+        ),
+        (
+            # CPW Position 5: exercises all promotion types
+            "promotions",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+            {1: 24, 2: 496, 3: 9483},
         ),
     ]
 
@@ -36,7 +42,7 @@ class PerftTests(unittest.TestCase):
 
     def test_perft_divide_sums_to_perft(self):
         board = Board()
-        board.set_fen("r3k2r/p1ppqpb1/bn2pnp1/2pPN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+        board.set_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
         mg = MoveGenerator(board)
 
         self.assertEqual(sum(nodes for _, nodes in mg.perft_divide(2)), mg.perft(2))

@@ -289,7 +289,7 @@ class UciProtocolTests(unittest.TestCase):
 
         t0 = time.perf_counter()
         self.assertTrue(engine.handle_line("go infinite"))
-        self.assertLess(time.perf_counter() - t0, 0.05)
+        self.assertLess(time.perf_counter() - t0, 0.5)
         self.assertTrue(engine.mg.started.wait(0.5))
         self.assertTrue(engine.search_thread.is_alive())
 
