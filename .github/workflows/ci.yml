@@ -6,8 +6,8 @@ on:
   pull_request:
 
 jobs:
-  tests:
-    name: Pytest
+  unit-tests:
+    name: Fast Unit Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -25,8 +25,52 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
 
-      - name: Run tests
-        run: python -m pytest -q
+      - name: Run fast unit tests
+        run: python -m pytest -q -m unit
+
+  perft-regression:
+    name: Perft Regression Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Run perft regression tests
+        run: python -m pytest -q -m perft
+
+  uci-protocol:
+    name: UCI Protocol Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Run UCI protocol tests
+        run: python -m pytest -q -m uci
 
   lint:
     name: Ruff
@@ -50,8 +94,8 @@ jobs:
       - name: Run Ruff
         run: python -m ruff check . --select E9,F63,F7,F82
 
-  benchmark-smoke:
-    name: Benchmark Smoke
+  benchmark-thresholds:
+    name: Benchmark Thresholds
     runs-on: ubuntu-latest
 
     steps:
@@ -67,7 +111,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements.txt pytest
 
-      - name: Run benchmark smoke
-        run: python benchmark.py --perft-depth 1 --search-depth 1 --movetime 1
+      - name: Run benchmark threshold tests
+        run: python -m pytest -q -m benchmark
