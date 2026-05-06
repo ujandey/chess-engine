@@ -124,6 +124,7 @@ class MoveGenerator:
         self.last_search_time = 0.0
         self.seldepth = 0
         self.tt_max_entries = 64 * 1024 * 1024 // 300  # ~224K entries (64 MB default)
+        self._timeout_mask = 2047  # check every 2048 nodes; tightened for short time controls
         if MoveGenerator.EVAL_TABLE is None:
             MoveGenerator.EVAL_TABLE = self._build_eval_table()
 
@@ -450,16 +451,23 @@ class MoveGenerator:
             return []
 
         is_white = piece.isupper()
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white else "black"
         pseudo_moves = self.get_piece_moves(row, col)
         legal_moves = []
 
-        for move in pseudo_moves:
-            move_state = self.board.make_move((row, col), move)
+        try:
+            for move in pseudo_moves:
+                move_state = self.board.make_move((row, col), move)
 
-            if not self.is_in_check(is_white):
-                legal_moves.append(move)
+                try:
+                    if not self.is_in_check(is_white):
+                        legal_moves.append(move)
+                finally:
+                    self.board.undo_move((row, col), move, move_state)
+        finally:
+            self.board.turn = previous_turn
 
-            self.board.undo_move((row, col), move, move_state)
 
         return legal_moves
 
@@ -533,20 +541,33 @@ class MoveGenerator:
 
     def generate_all_legal_moves(self, is_white):
         moves = []
+        previous_turn = self.board.turn
+        self.board.turn = "white" if is_white else "black"
 
-        for r, c in self.board.iter_side_pieces(is_white):
-            piece = self.board.get_piece(r, c)
-            if piece == "." or piece.isupper() != is_white:
-                self.board.refresh_zobrist_hash()
-                return self.generate_all_legal_moves(is_white)
+        try:
+            # piece_positions may be stale when board.board was assigned directly (e.g. tests).
+            # Refresh once; if it's still inconsistent after refresh the board itself is broken.
+            pieces = self.board.iter_side_pieces(is_white)
+            for r, c in pieces:
+                piece = self.board.get_piece(r, c)
+                if piece == "." or piece.isupper() != is_white:
+                    self.board.refresh_zobrist_hash()
+                    pieces = self.board.iter_side_pieces(is_white)
+                    break
 
-            is_pawn = piece.lower() == "p"
-            for end in self.get_legal_moves(r, c):
-                if is_pawn and end[0] in (0, 7):
-                    for promo in ("Q", "R", "B", "N"):
-                        moves.append(((r, c), end, promo))
-                else:
-                    moves.append(((r, c), end, None))
+            for r, c in pieces:
+                piece = self.board.get_piece(r, c)
+                if piece == "." or piece.isupper() != is_white:
+                    continue
+                is_pawn = piece.lower() == "p"
+                for end in self.get_legal_moves(r, c):
+                    if is_pawn and end[0] in (0, 7):
+                        for promo in ("Q", "R", "B", "N"):
+                            moves.append(((r, c), end, promo))
+                    else:
+                        moves.append(((r, c), end, None))
+        finally:
+            self.board.turn = previous_turn
 
         return moves
 
@@ -563,8 +584,10 @@ class MoveGenerator:
         try:
             for start, end, promo in self.generate_all_legal_moves(is_white):
                 move_state = self.board.push(start, end, promo)
-                nodes += self.perft(depth - 1, not is_white)
-                self.board.pop(move_state)
+                try:
+                    nodes += self.perft(depth - 1, not is_white)
+                finally:
+                    self.board.pop(move_state)
         finally:
             self.board.turn = previous_turn
 
@@ -580,8 +603,10 @@ class MoveGenerator:
         try:
             for start, end, promo in self.generate_all_legal_moves(is_white):
                 move_state = self.board.push(start, end, promo)
-                nodes = self.perft(depth - 1, not is_white)
-                self.board.pop(move_state)
+                try:
+                    nodes = self.perft(depth - 1, not is_white)
+                finally:
+                    self.board.pop(move_state)
                 results.append(((start, end, promo), nodes))
         finally:
             self.board.turn = previous_turn
@@ -662,11 +687,11 @@ class MoveGenerator:
         self.history[move] = self.history.get(move, 0) + depth * depth
 
     def order_moves(self, moves, is_white, depth=0, tt_move=None):
-        return sorted(
-            moves,
+        moves.sort(
             key=lambda m: self._move_order_score(m[0], m[1], m[2], depth, tt_move),
             reverse=True,
         )
+        return moves
 
     def _check_search_timeout(self):
         if self.stop_search:
@@ -710,7 +735,7 @@ class MoveGenerator:
                 states.append(state)
                 pv.append(move)
                 cur_white = not cur_white
-        except (IndexError, KeyError, TypeError, ValueError):
+        except (IndexError, KeyError, TypeError):
             pass
         finally:
             for st in reversed(states):
@@ -723,6 +748,22 @@ class MoveGenerator:
 
     def _evaluate_for_side(self, is_white_turn):
         return self._evaluate_material() * self._side_multiplier(is_white_turn)
+
+    def _score_to_tt(self, score, ply):
+        """Adjust mate score before TT storage: encode distance from *this node*, not root."""
+        if score >= self.MATE_SCORE - 50:
+            return score + ply
+        if score <= -(self.MATE_SCORE - 50):
+            return score - ply
+        return score
+
+    def _score_from_tt(self, score, ply):
+        """Undo mate-score adjustment when reading from TT: restore distance from root."""
+        if score >= self.MATE_SCORE - 50:
+            return score - ply
+        if score <= -(self.MATE_SCORE - 50):
+            return score + ply
+        return score
 
     def static_exchange_eval(self, start, end):
         sr, sc = start
@@ -760,14 +801,14 @@ class MoveGenerator:
         self.node_count += 1
         if ply > self.seldepth:
             self.seldepth = ply
-        if (self.node_count & 2047) == 0:
+        if (self.node_count & self._timeout_mask) == 0:
             self._check_search_timeout()
 
         previous_turn = self.board.turn
         self.board.turn = "white" if is_white_turn else "black"
 
         try:
-            stand_pat = self._evaluate_for_side(is_white_turn)
+            stand_pat = self._evaluate_material_fast() * self._side_multiplier(is_white_turn)
             if stand_pat >= beta:
                 return beta
             best = stand_pat
@@ -794,11 +835,12 @@ class MoveGenerator:
                     continue
 
                 move_state = self.board.push(start, end, promo)
-                if self.is_in_check(is_white_turn):
+                try:
+                    if self.is_in_check(is_white_turn):
+                        continue
+                    score = -self.quiescence(-beta, -alpha, not is_white_turn, ply + 1)
+                finally:
                     self.board.pop(move_state)
-                    continue
-                score = -self.quiescence(-beta, -alpha, not is_white_turn, ply + 1)
-                self.board.pop(move_state)
                 if score > best:
                     best = score
                 if best > alpha:
@@ -817,7 +859,7 @@ class MoveGenerator:
     def negamax(self, depth, is_white_turn, alpha=float("-inf"), beta=float("inf"), allow_null=True, ply=0):
         self.nodes_searched += 1
         self.node_count += 1
-        if (self.node_count & 2047) == 0:
+        if (self.node_count & self._timeout_mask) == 0:
             self._check_search_timeout()
 
         if self.board.halfmove_clock >= 100:
@@ -841,7 +883,8 @@ class MoveGenerator:
             tt_entry = self.transposition_table.get(tt_key)
             tt_move = tt_entry[3] if tt_entry is not None and len(tt_entry) > 3 else None
             if tt_entry is not None and tt_entry[0] >= depth:
-                _, tt_score, flag = tt_entry[:3]
+                _, tt_score_raw, flag = tt_entry[:3]
+                tt_score = self._score_from_tt(tt_score_raw, ply)
                 if flag == self._TT_EXACT:
                     return tt_score
                 if flag == self._TT_LOWER:
@@ -889,27 +932,26 @@ class MoveGenerator:
                 is_promotion = self.is_promotion_move(start, end)
 
                 move_state = self.board.push(start, end, promo)
-                gives_check = False
-                if move_index > 5 and depth >= 3 and not is_capture and not is_promotion:
-                    gives_check = self.is_in_check(not is_white_turn)
+                try:
+                    gives_check = False
+                    if move_index > 5 and depth >= 3 and not is_capture and not is_promotion:
+                        gives_check = self.is_in_check(not is_white_turn)
 
-                next_depth = depth - 1
-                reduced = False
-                if move_index > 5 and depth >= 3 and not is_capture and not is_promotion and not gives_check:
-                    next_depth = depth - 2
-                    reduced = True
+                    next_depth = depth - 1
+                    reduced = False
+                    if move_index > 5 and depth >= 3 and not is_capture and not is_promotion and not gives_check:
+                        next_depth = depth - 2
+                        reduced = True
 
-                if move_index == 0:
-                    score = -self.negamax(next_depth, not is_white_turn, -beta, -alpha, ply=ply + 1)
-                else:
-                    score = -self.negamax(next_depth, not is_white_turn, -alpha - 1, -alpha, ply=ply + 1)
-                    if score > alpha and score < beta:
-                        score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha, ply=ply + 1)
-
-                if reduced and score > alpha:
-                    score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha, ply=ply + 1)
-
-                self.board.pop(move_state)
+                    if move_index == 0:
+                        score = -self.negamax(next_depth, not is_white_turn, -beta, -alpha, ply=ply + 1)
+                    else:
+                        score = -self.negamax(next_depth, not is_white_turn, -alpha - 1, -alpha, ply=ply + 1)
+                        if score > alpha:
+                            if reduced or score < beta:
+                                score = -self.negamax(depth - 1, not is_white_turn, -beta, -alpha, ply=ply + 1)
+                finally:
+                    self.board.pop(move_state)
                 if score > best_score:
                     best_score = score
                     best_move_local = (start, end, promo)
@@ -921,15 +963,16 @@ class MoveGenerator:
                         self._store_history(depth, (start, end, promo))
                     break
 
-            if abs(best_score) < self.MATE_SCORE - 10:
-                if best_score <= alpha_orig:
-                    flag = self._TT_UPPER
-                elif best_score >= beta_orig:
-                    flag = self._TT_LOWER
-                else:
-                    flag = self._TT_EXACT
-                if len(self.transposition_table) < self.tt_max_entries:
-                    self.transposition_table[tt_key] = (depth, best_score, flag, best_move_local)
+            if best_score <= alpha_orig:
+                flag = self._TT_UPPER
+            elif best_score >= beta_orig:
+                flag = self._TT_LOWER
+            else:
+                flag = self._TT_EXACT
+            if len(self.transposition_table) < self.tt_max_entries:
+                self.transposition_table[tt_key] = (
+                    depth, self._score_to_tt(best_score, ply), flag, best_move_local
+                )
         finally:
             self.board.turn = previous_turn
 
@@ -967,6 +1010,8 @@ class MoveGenerator:
         self.last_completed_depth = 0
         self.search_deadline = (t0 + max_time) if max_time is not None else None
         self.stop_search = False
+        # Tighter timeout polling for short time controls (< 100 ms → check every 256 nodes)
+        self._timeout_mask = 255 if (max_time is not None and max_time < 0.1) else 2047
 
         try:
             for current_depth in range(1, depth + 1):
@@ -983,13 +1028,15 @@ class MoveGenerator:
                 for move_index, (start, end, promo) in enumerate(moves):
                     self.board.turn = "white" if is_white_turn else "black"
                     move_state = self.board.push(start, end, promo)
-                    if move_index == 0:
-                        score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha, ply=1)
-                    else:
-                        score = -self.negamax(current_depth - 1, not is_white_turn, -alpha - 1, -alpha, ply=1)
-                        if score > alpha and score < beta:
+                    try:
+                        if move_index == 0:
                             score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha, ply=1)
-                    self.board.pop(move_state)
+                        else:
+                            score = -self.negamax(current_depth - 1, not is_white_turn, -alpha - 1, -alpha, ply=1)
+                            if score > alpha and score < beta:
+                                score = -self.negamax(current_depth - 1, not is_white_turn, -beta, -alpha, ply=1)
+                    finally:
+                        self.board.pop(move_state)
 
                     if score > iter_best_score:
                         iter_best_score = score
@@ -1204,9 +1251,35 @@ class MoveGenerator:
     _KING_PRESSURE_WEIGHTS = {"n": 0.08, "b": 0.07, "r": 0.10, "q": 0.16}
     _ENDGAME_KING_ACTIVITY = 0.08
 
+    def _evaluate_material_fast(self):
+        """
+        Lightweight eval for quiescence stand_pat: material + PST + bishop pair only.
+        No move generation, no pawn maps, no king safety — O(64) with zero allocations.
+        """
+        score = 0
+        white_bishops = 0
+        black_bishops = 0
+        board = self.board.board
+        eval_table = self.EVAL_TABLE
+        for row in range(8):
+            row_data = board[row]
+            row_table = eval_table[row]
+            for col in range(8):
+                piece = row_data[col]
+                score += row_table[col][piece]
+                if piece == 'B':
+                    white_bishops += 1
+                elif piece == 'b':
+                    black_bishops += 1
+        if white_bishops >= 2:
+            score += self._BISHOP_PAIR_BONUS
+        if black_bishops >= 2:
+            score -= self._BISHOP_PAIR_BONUS
+        return score
+
     def _evaluate_material(self):
         """
-        Hot-path evaluation used by quiescence stand_pat and evaluate_position.
+        Full evaluation used by evaluate_position and depth-0 nodes.
         Single O(64) board scan accumulates:
           - material + PST via precomputed EVAL_TABLE
           - bishop counts for bishop pair bonus
