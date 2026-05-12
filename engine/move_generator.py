@@ -872,7 +872,7 @@ class MoveGenerator:
 
         try:
             in_check = self.is_in_check(is_white_turn)
-            if in_check and ply < self._search_root_depth + self._MAX_CHECK_EXT:
+            if in_check and depth + ply < self._search_root_depth + self._MAX_CHECK_EXT:
                 depth += 1
 
             alpha_orig = alpha
@@ -976,7 +976,7 @@ class MoveGenerator:
             if _existing is None:
                 if len(self.transposition_table) < self.tt_max_entries:
                     self.transposition_table[tt_key] = _new_entry
-            elif _existing[0] <= depth:
+            elif _existing[0] < depth or (_existing[0] == depth and _existing[2] != self._TT_EXACT):
                 self.transposition_table[tt_key] = _new_entry
         finally:
             self.board.turn = previous_turn
