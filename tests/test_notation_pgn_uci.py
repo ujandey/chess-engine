@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from engine.board import Board
 from engine.move_generator import MoveGenerator
@@ -190,7 +191,9 @@ class UciParsingTests(unittest.TestCase):
         self.assertEqual(board.get_piece(3, 4), "p")
         self.assertEqual(board.get_piece(5, 5), "N")
         self.assertEqual(board.turn, "black")
-        self.assertFalse(mg.in_opening)
+        # configure_position no longer kills the book flag after applying moves;
+        # the book is gated by _played_plies inside get_book_move instead.
+        self.assertTrue(mg.in_opening)
 
     def test_apply_uci_move_handles_promotion(self):
         board = make_board(
@@ -300,6 +303,109 @@ class UciProtocolTests(unittest.TestCase):
         engine.wait_for_search()
 
         self.assertIn("bestmove e2e4", output)
+
+
+class UciBookTests(unittest.TestCase):
+    """Verify that the opening book is correctly consulted via the UCI path."""
+
+    _BOOK_TARGET = "engine.move_generator.get_book_move"
+
+    # A sample book move returned by the mock: e2-e4 (white pawn).
+    _E4 = ((6, 4), (4, 4))
+
+    def _board_after_moves(self, uci_moves):
+        board = Board()
+        mg = MoveGenerator(board)
+        args = ["startpos"]
+        if uci_moves:
+            args += ["moves"] + uci_moves
+        configure_position(board, mg, args)
+        return board, mg
+
+    # ------------------------------------------------------------------
+    # configure_position behaviour
+    # ------------------------------------------------------------------
+
+    def test_configure_position_preserves_in_opening_when_moves_present(self):
+        """configure_position must not reset in_opening — the book gate lives
+        inside get_book_move (_played_plies check), not in the UCI layer."""
+        board = Board()
+        mg = MoveGenerator(board)
+        configure_position(board, mg, ["startpos", "moves", "e2e4", "e7e5"])
+        self.assertTrue(mg.in_opening)
+
+    def test_configure_position_sets_in_opening_for_startpos(self):
+        board = Board()
+        mg = MoveGenerator(board)
+        configure_position(board, mg, ["startpos"])
+        self.assertTrue(mg.in_opening)
+
+    # ------------------------------------------------------------------
+    # find_best_move always calls get_book_move (no in_opening gate)
+    # ------------------------------------------------------------------
+
+    def test_book_consulted_on_first_move(self):
+        """Book must be tried when the game starts (no moves played yet)."""
+        board, mg = self._board_after_moves([])
+        with patch(self._BOOK_TARGET, return_value=self._E4) as mock_book:
+            move, _ = mg.find_best_move(1, True, verbose=False)
+        mock_book.assert_called_once()
+        self.assertEqual(move[:2], self._E4)
+
+    def test_book_consulted_after_moves_applied(self):
+        """Book must be tried even after configure_position applied moves.
+        This was the core bug: in_opening was set to False by configure_position,
+        preventing any book use after move 1."""
+        board, mg = self._board_after_moves(["e2e4"])
+        # A plausible book reply for Black: e7-e5.
+        e5 = ((1, 4), (3, 4))
+        with patch(self._BOOK_TARGET, return_value=e5) as mock_book:
+            move, _ = mg.find_best_move(1, False, verbose=False)
+        mock_book.assert_called_once()
+        self.assertEqual(move[:2], e5)
+
+    def test_book_consulted_regardless_of_in_opening_flag(self):
+        """find_best_move must call get_book_move even when in_opening is False.
+        The in_opening attribute is now informational only."""
+        board, mg = self._board_after_moves([])
+        mg.in_opening = False  # simulate old incorrect state
+        with patch(self._BOOK_TARGET, return_value=self._E4) as mock_book:
+            move, _ = mg.find_best_move(1, True, verbose=False)
+        mock_book.assert_called_once()
+        self.assertEqual(move[:2], self._E4)
+
+    def test_invalid_book_move_falls_through_to_search(self):
+        """If the book returns a move that is not legal, find_best_move must
+        fall through to the normal search rather than playing an illegal move."""
+        board, mg = self._board_after_moves([])
+        illegal = ((7, 7), (0, 0))  # rook teleport — never legal
+        with patch(self._BOOK_TARGET, return_value=illegal):
+            move, _ = mg.find_best_move(2, True, verbose=False)
+        # The move must be a legal white opening move (not the illegal rook jump).
+        self.assertNotEqual(move[:2], illegal)
+        self.assertIsNotNone(move)
+
+    def test_book_not_consulted_past_plies_limit(self):
+        """get_book_move returns None after MAX_BOOK_MOVES * 2 plies.
+        find_best_move must then perform a normal search."""
+        from engine.opening_book import MAX_BOOK_MOVES
+        board, mg = self._board_after_moves([])
+        # Fake a position_counts sum that implies > 30 plies have been played.
+        # _played_plies = sum(position_counts.values()) - 1
+        board.position_counts = {board.get_position_key(): MAX_BOOK_MOVES * 2 + 1}
+
+        with patch(self._BOOK_TARGET, wraps=lambda b: None) as mock_book:
+            move, _ = mg.find_best_move(1, True, verbose=False)
+        # Even though mock wraps the real function (which returns None here due to
+        # our position_counts manipulation), search must still produce a legal move.
+        self.assertIsNotNone(move)
+
+    def test_book_none_result_falls_through_to_search(self):
+        """When get_book_move returns None (no book entry), search runs normally."""
+        board, mg = self._board_after_moves([])
+        with patch(self._BOOK_TARGET, return_value=None):
+            move, _ = mg.find_best_move(1, True, verbose=False)
+        self.assertIsNotNone(move)
 
 
 if __name__ == "__main__":

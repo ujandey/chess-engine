@@ -13,6 +13,7 @@ class MoveGenerator:
     _TT_EXACT = 0
     _TT_LOWER = 1  # failed high — score is a lower bound
     _TT_UPPER = 2  # failed low  — score is an upper bound
+    _MAX_CHECK_EXT = 3  # max extra plies of check extension per path
 
     # Evaluation constants
     _BISHOP_PAIR_BONUS = 0.30
@@ -121,6 +122,7 @@ class MoveGenerator:
         self.search_deadline = None
         self.stop_search = False
         self.last_completed_depth = 0
+        self._search_root_depth = 0
         self.last_search_time = 0.0
         self.seldepth = 0
         self.tt_max_entries = 64 * 1024 * 1024 // 300  # ~224K entries (64 MB default)
@@ -870,7 +872,7 @@ class MoveGenerator:
 
         try:
             in_check = self.is_in_check(is_white_turn)
-            if in_check:
+            if in_check and ply < self._search_root_depth + self._MAX_CHECK_EXT:
                 depth += 1
 
             alpha_orig = alpha
@@ -969,10 +971,13 @@ class MoveGenerator:
                 flag = self._TT_LOWER
             else:
                 flag = self._TT_EXACT
-            if len(self.transposition_table) < self.tt_max_entries:
-                self.transposition_table[tt_key] = (
-                    depth, self._score_to_tt(best_score, ply), flag, best_move_local
-                )
+            _new_entry = (depth, self._score_to_tt(best_score, ply), flag, best_move_local)
+            _existing = self.transposition_table.get(tt_key)
+            if _existing is None:
+                if len(self.transposition_table) < self.tt_max_entries:
+                    self.transposition_table[tt_key] = _new_entry
+            elif _existing[0] <= depth:
+                self.transposition_table[tt_key] = _new_entry
         finally:
             self.board.turn = previous_turn
 
@@ -983,15 +988,13 @@ class MoveGenerator:
         self.board.turn = "white" if is_white_turn else "black"
 
         try:
-            if self.in_opening:
-                book_move = get_book_move(self.board)
-                if book_move is not None:
-                    start, end = book_move
-                    if end in self.get_legal_moves(start[0], start[1]):
-                        piece = self.board.get_piece(start[0], start[1])
-                        promo = "Q" if piece.lower() == "p" and end[0] in (0, 7) else None
-                        return (start, end, promo), self.evaluate_position()
-                self.in_opening = False
+            book_move = get_book_move(self.board)
+            if book_move is not None:
+                start, end = book_move
+                if end in self.get_legal_moves(start[0], start[1]):
+                    piece = self.board.get_piece(start[0], start[1])
+                    promo = "Q" if piece.lower() == "p" and end[0] in (0, 7) else None
+                    return (start, end, promo), self.evaluate_position()
 
             moves = self.generate_all_legal_moves(is_white_turn)
         finally:
@@ -1015,6 +1018,10 @@ class MoveGenerator:
 
         try:
             for current_depth in range(1, depth + 1):
+                self._search_root_depth = current_depth
+                if self.history:
+                    for _hk in self.history:
+                        self.history[_hk] >>= 1
                 depth_t0 = time.perf_counter()
                 depth_nodes_before = self.nodes_searched
                 self.seldepth = 0
@@ -1213,9 +1220,6 @@ class MoveGenerator:
             return True
 
         if total_minors == 1:
-            return True
-
-        if white_knights == 1 and black_knights == 1 and total_minors == 2:
             return True
 
         if (

@@ -210,8 +210,11 @@ class GameStateTests(unittest.TestCase):
 
         status = mg.get_game_status()
 
-        self.assertTrue(mg.is_insufficient_material())
-        self.assertEqual(status["result"], "insufficient_material")
+        # KN vs KN is not insufficient material per FIDE rules — checkmate is
+        # theoretically possible (with opponent co-operation).  The game should
+        # continue and resolve via the 50-move rule, not be auto-declared a draw.
+        self.assertFalse(mg.is_insufficient_material())
+        self.assertNotEqual(status["result"], "insufficient_material")
 
     def test_insufficient_material_same_color_bishops(self):
         board = Board()

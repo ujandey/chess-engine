@@ -87,7 +87,6 @@ def configure_position(board, mg, args):
     if move_index < len(args) and args[move_index] == "moves":
         for move_text in args[move_index + 1:]:
             apply_uci_move(board, mg, move_text)
-        mg.in_opening = False
 
 
 def _compute_movetime(args, is_white):
